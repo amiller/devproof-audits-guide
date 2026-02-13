@@ -2,6 +2,32 @@
 
 Quick reference for auditing dstack/Phala TEE applications.
 
+## Step 0: Fetch Deployed Configuration
+
+**Important:** You don't need account access to audit a dstack app. All metadata is public via the 8090 endpoint.
+
+```bash
+# Verify compose hash and fetch app_compose
+./tools/verify-compose-hash.py <app-id> <cluster>
+
+# Example:
+./tools/verify-compose-hash.py f44389ef4e953f3c53847cc86b1aedc763978e83 dstack-pha-prod9
+```
+
+This gives you:
+- `compose_hash` - the attested configuration hash
+- `app_compose` - the full deployed configuration including:
+  - `docker_compose_file` - what containers are running
+  - `allowed_envs` - what the operator can configure
+  - `pre_launch_script` - what runs before the app starts
+  - `features`, `kms_enabled`, etc.
+
+**Note:** `phala cvms attestation` only works for apps you own - useless for third-party auditing.
+
+For full attestation verification, use the trust-center:
+- UI: `https://trust.phala.com/app/<app-id>`
+- API: `@phala/dstack-verifier` package
+
 ## The Core Question
 
 **Can the operator exfiltrate user data or compromise privacy guarantees?**
@@ -78,6 +104,19 @@ grep -rn "recover_message\|verify_signature\|ecdsa\|secp256k1" --include="*.py"
 
 ### 4. Build Reproducibility
 
+**FIRST: Check if you can even verify the image:**
+```bash
+# Get deployed app_compose
+./tools/verify-compose-hash.py <app-id> <cluster>
+
+# Look at docker_compose_file - are images hardcoded or ${VAR}?
+# BAD (unverifiable): image: ${MY_APP_IMAGE}
+# GOOD (verifiable):  image: ghcr.io/org/app@sha256:abc123...
+```
+
+If images are `${VAR}` references in allowed_envs: **STOP - reproducible build verification is impossible.** The actual image digests are operator secrets.
+
+**If images ARE hardcoded in compose:**
 ```bash
 # Check Dockerfile
 cat Dockerfile | grep -E "FROM|SOURCE_DATE_EPOCH|apt-get|pip install"
@@ -91,6 +130,7 @@ cat .github/workflows/*.yml | grep -E "rewrite-timestamp|SOURCE_DATE_EPOCH|build
 - No `SOURCE_DATE_EPOCH` set
 - `apt-get update` without snapshot pinning
 - No `--rewrite-timestamp` in buildx
+- `image: ${VAR}` where VAR is in allowed_envs (audit blind spot)
 
 ### 5. Storage and Secrets
 

@@ -46,6 +46,7 @@ See [framework/STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) for detaile
 | [primus](case-studies/primus/) | 0 | Closed-source core (`libpado.so`), binary blobs |
 | [talos](case-studies/talos/) | ~1 | Reproducible builds, but enclave ID verification gap |
 | [tee-totalled](case-studies/tee-totalled/) | 0 | `LLM_BASE_URL` operator-configurable (exfiltration) |
+| [tokscope-xordi](case-studies/tokscope-xordi/) | 0 | `XORDI_API_URL` operator-configurable, fallback encryption key |
 | [confer.to](case-studies/confer/) | 0 | Analysis in progress |
 | [xordi-toy-example](case-studies/xordi-toy-example/) | **1** | Reference implementation with Base KMS |
 
@@ -70,7 +71,25 @@ See [LEARNINGS.md](LEARNINGS.md) for detailed patterns.
 
 ## Tools
 
-- [dstack-audit-plugin](tools/dstack-audit-plugin/) - Claude Code skill for auditing
+### Verification Scripts
+- **[verify-compose-hash.py](tools/verify-compose-hash.py)** - Verify compose hash from 8090 endpoint
+  ```bash
+  ./tools/verify-compose-hash.py <app-id> [cluster]
+  # Example: ./tools/verify-compose-hash.py f44389ef4e953f3c53847cc86b1aedc763978e83 dstack-pha-prod9
+  ```
+
+### External Tools
+- **Trust Center UI**: [trust.phala.com](https://trust.phala.com) - Visual attestation verification
+- **[@phala/dstack-verifier](https://github.com/Phala-Network/trust-center/tree/main/packages/verifier)** - Full attestation verification library
+- **[dstack-mr](https://github.com/kvinwang/dstack-mr)** - OS measurement computation
+- **[dcap-qvl](https://github.com/Phala-Network/dcap-qvl)** - TDX quote verification
+
+### Data Sources (for third-party auditing)
+- **8090 endpoint**: `https://<app-id>-8090.<cluster>.phala.network/` - TCB info, app_compose, event log
+- **Note**: `phala cvms attestation` only works for apps you own - useless for third-party auditing
+
+### Claude Code Skills
+- [dstack-audit-plugin](tools/dstack-audit-plugin/) - Automated audit skill
 
 ## References
 

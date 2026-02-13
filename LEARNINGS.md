@@ -191,14 +191,221 @@ The app was still vulnerable (configurable URL), but the transparency tooling wa
 
 ---
 
+## 11. Compose Hash Verification (For Third-Party Auditors)
+
+**Important:** `phala cvms attestation` only works for apps YOU own. For third-party auditing, use the 8090 metadata endpoint.
+
+**The Formula:**
+```
+compose_hash = sha256(app_compose_json_string)
+```
+
+**How to fetch app_compose (third-party auditing):**
+```bash
+# Fetch the 8090 metadata page
+curl -s "https://<app-id>-8090.<cluster>.phala.network/"
+
+# The tcb_info is in a <textarea readonly> element
+# Extract and decode HTML entities to get JSON
+# app_compose is a field in that JSON
+```
+
+**Verification script:** `tools/verify-compose-hash.py`
+```bash
+./tools/verify-compose-hash.py <app-id> [cluster]
+# Example:
+./tools/verify-compose-hash.py f44389ef4e953f3c53847cc86b1aedc763978e83 dstack-pha-prod9
+```
+
+**The app_compose JSON includes:**
+- `docker_compose_file`: the raw docker-compose.yaml content
+- `allowed_envs`: environment variables the operator can set
+- `features`: enabled dstack features (e.g., `["kms"]`)
+- `kms_enabled`, `public_logs`, `public_sysinfo`, etc.
+- `pre_launch_script`: script that runs before docker-compose up
+
+**Key insight:** The compose_hash is computed from the **exact JSON string** of app_compose. This means:
+- You CAN verify the hash matches what's attested
+- The app_compose content IS the audit artifact (inspect it, don't just hash it)
+- Image tags in docker_compose_file may be `${VAR}` references - check allowed_envs
+
+**What to audit in app_compose:**
+1. `allowed_envs` - can operator inject malicious config?
+2. `docker_compose_file` - are URLs hardcoded or `${VAR}` references?
+3. `pre_launch_script` - any suspicious commands?
+4. Image references - pinned by digest or using env vars?
+
+**Advanced verification tools:**
+- `@phala/dstack-verifier` package (trust-center repo): Full attestation verification
+- Trust Center UI: `https://trust.phala.com/app/<app-id>`
+
+---
+
+## 12. Git Branch HEAD vs Deployed Commit
+
+**Pitfall:** The git branch you're reviewing may not match what's deployed.
+
+```
+Branch HEAD (e.g., tokscope-xordi) → may contain newer/older code
+Deployed commit (in image tag) → what's actually running in TEE
+```
+
+**Example (tokscope-xordi):**
+- Branch HEAD (`e4ffe87`): Had hardcoded fallback encryption key
+- Deployed version (`58ad3f2` from tag `v1.1.0-58ad3f2`): Key derivation fixed
+
+**How to trace correctly:**
+1. Get compose hash from 8090 endpoint
+2. Find image tag in `docker_compose_file` within app_compose
+3. Image tag often contains commit SHA (e.g., `v1.1.0-58ad3f2`)
+4. Checkout THAT commit, not branch HEAD
+
+```bash
+# Wrong
+git checkout tokscope-xordi
+# Right
+git checkout 58ad3f2
+```
+
+---
+
+## 13. Trust-Center Verifier Build Issues
+
+**Reality:** The trust-center verifier Docker build fails out of the box.
+
+```
+# packages/verifier Dockerfile requires:
+# - dcap-qvl: TDX quote verification (Rust)
+# - dstack-mr-cli: RTMR computation (Rust)
+# - qemu-tdx: ACPI table extraction (C++)
+```
+
+**dcap-qvl fails with:**
+```
+error[E0464]: multiple candidates for `rlib` dependency `webpki` found
+error: could not compile `dcap-qvl` (lib) due to 10 previous errors
+```
+
+**Workarounds:**
+1. Use **trust.phala.com** for attestation verification (recommended)
+2. Use **verify-compose-hash.py** for compose hash verification only
+3. Wait for pre-built Docker images from Phala team
+
+**What you CAN verify without trust-center:**
+- Compose hash (sha256 of app_compose string)
+- app_compose contents (allowed_envs, docker_compose_file, features)
+- Image digests (docker pull + inspect)
+
+**What REQUIRES trust-center or trust.phala.com:**
+- TDX quote verification (cryptographic attestation)
+- RTMR computation (OS measurement)
+- Full TCB verification chain
+
+---
+
+## 15. Image References via allowed_envs (Audit Blind Spot)
+
+**Critical gap:** When `docker_compose_file` uses `${VAR}` for image references and that var is in `allowed_envs`, auditors CANNOT verify what image is running.
+
+**Example (tokscope-xordi):**
+```yaml
+# In docker_compose_file:
+image: ${TOKSCOPE_ENCLAVE_IMAGE}
+image: ${TOKSCOPE_BROWSER_MANAGER_IMAGE}
+
+# In allowed_envs:
+["TOKSCOPE_ENCLAVE_IMAGE", "TOKSCOPE_BROWSER_MANAGER_IMAGE", ...]
+```
+
+**What compose_hash proves:**
+- The TEMPLATE is correct (`${TOKSCOPE_ENCLAVE_IMAGE}`)
+- The allowed_envs list is correct
+
+**What compose_hash does NOT prove:**
+- What image digest is actually running
+- Whether the image was built from the claimed source
+
+**The problem:** Operator sets these values in the Phala Cloud dashboard. They're secrets. Not exposed in:
+- 8090 endpoint tcb_info
+- Trust Center UI
+- event_log
+
+**Implications:**
+1. You can audit the app's compose template but not the actual deployment
+2. Operator could deploy a malicious image with same name/tag
+3. Reproducible build verification is impossible without the actual image digest
+
+**Better pattern:** Hardcode image digests in docker_compose_file:
+```yaml
+# BAD (operator-controlled):
+image: ${MY_APP_IMAGE}
+
+# GOOD (auditable):
+image: ghcr.io/org/app@sha256:abc123...
+```
+
+**If allowed_envs MUST include images:** The operator should publish a DEPLOYMENTS.md or on-chain record showing which image digests they configured.
+
+---
+
+## 14. How to Actually Verify Reproducible Builds
+
+Saying "builds are reproducible" requires demonstrating it.
+
+**Step 1: Get the deployed image digest**
+```bash
+# From app_compose docker_compose_file
+image: ghcr.io/org/app@sha256:abc123...
+```
+
+**Step 2: Clone and checkout the exact commit**
+```bash
+git clone <repo>
+git checkout <commit-sha>  # From image tag, NOT branch HEAD
+```
+
+**Step 3: Rebuild with reproducibility flags**
+```bash
+# Check Dockerfile for:
+# - Base image pinned by digest
+# - SOURCE_DATE_EPOCH set
+# - No apt-get update without pinning
+
+docker buildx build \
+  --platform linux/amd64 \
+  --output type=docker \
+  --build-arg SOURCE_DATE_EPOCH=0 \
+  -t test-rebuild .
+```
+
+**Step 4: Compare digests**
+```bash
+docker inspect --format='{{.Id}}' test-rebuild
+# Should match the deployed digest
+```
+
+**Common reasons for mismatch:**
+- Base image not pinned (`FROM node:20` vs `@sha256:...`)
+- Timestamps not normalized (missing SOURCE_DATE_EPOCH)
+- `apt-get update` pulls different package versions
+- Build context includes `.git` or other variable files
+
+**What "reproducible" means:**
+- Same source → same image digest
+- ANY developer can verify the deployed binary matches the reviewed source
+
+---
+
 ## Stage 1 Quick Check
 
 For any dstack app (fail any = Stage 0):
 
 1. [ ] Are URLs handling user data hardcoded in compose (not `${VAR}`)?
-2. [ ] Is the image pinned by digest (not tag)?
+2. [ ] Is the image pinned by digest in docker_compose_file (not `${IMAGE_VAR}` in allowed_envs)?
 3. [ ] Does it use Base KMS (for transparency logs)?
 4. [ ] Is there a DEPLOYMENTS.md or on-chain history?
 5. [ ] Are builds reproducible (pinned base images, SOURCE_DATE_EPOCH)?
 6. [ ] Any "known issue" comments around security checks?
 7. [ ] Any dev fallbacks that could be triggered in production?
+8. [ ] Are you reviewing the deployed commit (not branch HEAD)?
+9. [ ] Can you trace: compose_hash → docker_compose_file → image digest → source commit?
