@@ -105,6 +105,71 @@ For any custom-domain dstack app, set up CT monitoring (e.g., via crt.sh or Goog
 
 ---
 
+## Proposed Fix: Embed app_id in TLS Certificates
+
+A lighter-weight alternative to on-chain domain binding: have dstack-ingress embed the app_id in the TLS certificate itself, using CT logs as the transparency layer.
+
+### Current State
+
+Certs issued by dstack-ingress are vanilla Let's Encrypt domain-validated certs:
+```
+Subject: CN = app.example.com
+SAN: DNS:app.example.com
+```
+
+No TEE identity. The cert proves someone controlled DNS for the domain and ran ACME inside *some* TEE — but not *which* TEE.
+
+### Proposed Change
+
+dstack-ingress embeds the app_id (and optionally compose_hash) in the certificate:
+
+**Option A: Custom X.509 extension**
+```
+X509v3 extensions:
+    1.3.6.1.4.1.XXXXX.1 (dstack-app-id):
+        db82f581256a3c9244c4d7129a67336990d08cdf
+    1.3.6.1.4.1.XXXXX.2 (dstack-compose-hash):
+        a8105997bfe1010d620679c18894aec23b5056b2ac1311048810ce14271362e3
+```
+
+**Option B: SAN encoding**
+```
+SAN: DNS:app.example.com,
+     DNS:_dstack.db82f581256a3c9244c4d7129a67336990d08cdf.app.example.com
+```
+
+Option B works with existing Let's Encrypt infrastructure (no custom extensions needed), though it requires DNS control of the subdomain.
+
+### Why This Works
+
+1. **CT logs become an app_id transparency log.** Every cert issuance is logged immutably with the app_id. Search crt.sh for all certs ever associated with a domain — if the app_id changes, it's visible.
+
+2. **Domain redirect attacks become detectable in CT.** If a different app_id appears in a cert for `app.example.com`, that's evidence of a redirect — even after the DNS TXT record is reverted.
+
+3. **No on-chain component needed.** Uses existing CT infrastructure (already mandated by browsers) as the transparency layer. No smart contract changes, no new protocol.
+
+4. **Clients can verify app_id from the TLS handshake.** A browser extension or verification tool could extract the app_id from the cert and check it against expected values, without hitting a separate `/evidences/` endpoint.
+
+### Limitations
+
+- Let's Encrypt may not support custom X.509 extensions (Option A). SAN encoding (Option B) is more practical.
+- CT log ingestion has delays (hours). Not real-time prevention.
+- Requires dstack-ingress code changes to include app_id in the CSR.
+- Does not prevent the redirect — only makes it visible after the fact. But "visible after the fact in an immutable log" is a significant improvement over "completely invisible."
+
+### Comparison of Approaches
+
+| Approach | Prevents redirect? | Detectable? | Detection delay | Requires protocol change? |
+|----------|-------------------|-------------|-----------------|--------------------------|
+| Current (nothing) | No | No | N/A | No |
+| DNS monitoring | No | Yes (polling) | Minutes | No |
+| App_id in cert (this proposal) | No | Yes (immutable CT log) | Hours | dstack-ingress only |
+| On-chain domain binding | Yes (gateway enforces) | Yes | Real-time | dstack gateway + smart contract |
+
+The cert-embedding approach is the best bang-for-buck: it requires only a dstack-ingress change, uses existing infrastructure, and produces an immutable audit trail. On-chain domain binding is stronger but requires more protocol work.
+
+---
+
 ## Scope
 
 This gap affects **every dstack app using a custom domain**, not just any specific project. It is an architectural limitation of the current dstack gateway design.
