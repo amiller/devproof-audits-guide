@@ -1,8 +1,10 @@
 # Hermes TEE Best Practices Audit
 
-**Audit Date:** 2026-02-10
+**Initial Audit:** 2026-02-10
+**Updated:** 2026-02-20
 **Auditor:** @socrates1024 (with Claude Opus)
 **App ID:** `db82f581256a3c9244c4d7129a67336990d08cdf`
+**Custom Domain:** `hermes.teleport.computer`
 **Comparison:** [xordi-release-process](https://github.com/Account-Link/xordi-release-process/)
 
 ---
@@ -10,6 +12,8 @@
 ## Executive Summary
 
 Hermes runs in a TEE on Phala Cloud with solid architecture for protecting secrets and pending entries. However, several gaps exist in the **verification chain** and **transparency logging** that prevent users from independently auditing what code has run.
+
+**2026-02-20 update:** The compose hash has changed since the initial audit, confirming active upgrades with no public record. CT log and DNS analysis provides baseline data for ongoing monitoring. A new architectural gap was identified in the custom domain routing layer (see [DOMAIN-BINDING-GAP.md](../../framework/DOMAIN-BINDING-GAP.md)).
 
 | Category | Status | Notes |
 |----------|--------|-------|
@@ -19,6 +23,7 @@ Hermes runs in a TEE on Phala Cloud with solid architecture for protecting secre
 | Reproducible Builds | ❌ FAIL | Unpinned base images, npm ci |
 | Source-to-Image Chain | ⚠️ PARTIAL | SHA tags exist but image not pinned by digest |
 | Upgrade History | ❌ FAIL | No record of which versions deployed when |
+| Domain Binding | ⚠️ NEW | Custom domain routed via mutable DNS TXT record |
 
 ---
 
@@ -26,18 +31,111 @@ Hermes runs in a TEE on Phala Cloud with solid architecture for protecting secre
 
 ### What's Attested (from 8090 page)
 
+As of 2026-02-20:
+
 ```
-compose_hash:   7bd518dfe5aa1c4a00c36fa580dfe14b891b77ff2c6e59c51d3f723db3983152
+compose_hash:   a8105997bfe1010d620679c18894aec23b5056b2ac1311048810ce14271362e3
 os_image_hash:  e18f5407b33e3c9ce7db827f2d351c98cc7a3fe9814ae6607280162e88bec010
-device_id:      05c73429bc3868cca111bcf158ad59167b1f0c0d2dd8e0b98839d59e5cf0222d
+instance_id:    84a195b87dacc0d7e3fbd501d9d02e38194abbe9
 key_provider:   kms (Phala)
+dstack_version: 0.5.5
+kernel:         6.9.0-dstack
+image:          docker.io/generalsemantics/hermes:a3cf0e6
 ```
+
+### Compose Hash Change Detected
+
+| Field | Feb 10 (initial audit) | Feb 20 (follow-up) | Changed? |
+|-------|----------------------|---------------------|----------|
+| compose_hash | `7bd518...3152` | `a81059...62e3` | **YES** |
+| os_image_hash | `e18f54...c010` | `e18f54...c010` | No |
+| image tag | `hermes:126d663` | `hermes:a3cf0e6` | **YES** |
+| dstack version | 0.5.5 | 0.5.5 | No |
+
+The compose hash changed because the image tag was updated from `126d663` (pushed Feb 7) to `a3cf0e6` (pushed Feb 18). Because Hermes uses Pha KMS, there is **no public record** of when this upgrade happened or what intermediate versions may have been deployed.
 
 ### Image History (Docker Hub)
 
-30 versions pushed since Jan 16, 2026. Current: `hermes:126d663` (sha256:5dc4f101...)
+50+ tags pushed since Jan 14, 2026. Active development with frequent commits.
 
-**Gap:** No record of which versions were actually deployed to the TEE, or when.
+Selected timeline:
+
+| Date | Tag | Digest (prefix) |
+|------|-----|-----------------|
+| 2026-01-14 | `c4abb6a` | `004cb5...` |
+| 2026-01-16 | `659d768` | `7af949...` |
+| 2026-01-22 | `63fb71b` | `6a656a...` |
+| 2026-02-02 | `v4`/`latest` | `3fbe66...` |
+| 2026-02-07 | `126d663` ← initial audit | `5dc4f1...` |
+| 2026-02-12 | `aa6e1b4` | `8e5d51...` |
+| 2026-02-17 | `55fa7a7`, `a3c16f0`, `4c86882` | various |
+| 2026-02-18 | `a3cf0e6` ← current | `6df525...` |
+
+**Gap:** No record of which of these 50+ versions were actually deployed to the TEE, or when. Any of them could have been deployed and reverted without evidence.
+
+---
+
+## Custom Domain Analysis (NEW — 2026-02-20)
+
+### DNS Configuration
+
+```
+hermes.teleport.computer
+  CNAME → db82f581256a3c9244c4d7129a67336990d08cdf-3000.dstack-pha-prod9.phala.network
+
+_dstack-app-address.hermes.teleport.computer
+  TXT   → "db82f581256a3c9244c4d7129a67336990d08cdf:443"
+```
+
+The CNAME points to the app's port 3000 (raw HTTP), while the `_dstack-app-address` TXT record directs the dstack gateway to route TLS traffic to port 443 (dstack-ingress sidecar inside the TEE).
+
+### Domain Binding Gap
+
+The mapping from `hermes.teleport.computer` to app_id `db82f5...` is controlled entirely by DNS. The domain owner can change the `_dstack-app-address` TXT record at any time to point to a different app_id. The dstack gateway follows DNS without any on-chain or attested verification of the binding.
+
+This is a **dstack architectural gap**, not specific to Hermes. See [DOMAIN-BINDING-GAP.md](../../framework/DOMAIN-BINDING-GAP.md) for full analysis.
+
+**Attack scenario:**
+1. Change TXT record → different app_id (malicious TEE app)
+2. Gateway routes `hermes.teleport.computer` to the malicious app
+3. Malicious app obtains a Let's Encrypt cert (it's a valid TEE)
+4. Revert TXT record → original app_id
+5. No on-chain evidence
+
+### Certificate Transparency Analysis
+
+4 certificates ever issued for `hermes.teleport.computer` (all Let's Encrypt):
+
+| Issued | Expires | Issuer | Serial (prefix) |
+|--------|---------|--------|-----------------|
+| 2025-12-31 18:37 | 2026-03-31 | LE E7 | `06ffce...` |
+| 2026-01-02 01:21 | 2026-04-02 | LE E8 | `05adf0...` |
+| 2026-01-02 02:24 | 2026-04-02 | LE E7 | `0629e6...` |
+| 2026-01-02 02:41 | 2026-04-02 | LE E7 | `054f46...` |
+
+All 4 certs were issued within a ~32 hour window (Dec 31 – Jan 2), consistent with initial setup. No new certs issued since Jan 2 — no evidence of domain redirect attacks.
+
+**CT monitoring recommendation:** Set up alerts on [crt.sh](https://crt.sh/?q=hermes.teleport.computer) or [Certspotter](https://sslmate.com/certspotter/) for new certificate issuance on `hermes.teleport.computer`. A new cert outside the normal 60-day renewal window is a red flag.
+
+### CAA Records
+
+`phala.network` has restrictive CAA:
+```
+CAA 0 issue    "letsencrypt.org;validationmethods=dns-01;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/2677326931"
+CAA 0 issuewild "letsencrypt.org;validationmethods=dns-01;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/2677326931"
+```
+
+Only Let's Encrypt, only DNS-01 validation, pinned to a specific ACME account. This prevents non-TEE impersonation of the built-in `*.phala.network` subdomains. However, CAA on `phala.network` does **not** protect `hermes.teleport.computer` — that domain's CAA is controlled by whoever owns `teleport.computer`.
+
+### Phala Cloud Infrastructure (from CT Logs)
+
+CT log enumeration of `*.phala.network` wildcard certs revealed 47 dstack clusters:
+
+- **By chain:** `dstack-pha-*` (Phala), `dstack-base-*` (Base), `dstack-eth-*` (Ethereum)
+- **By purpose:** prod, GPU, testnet, partner integrations (Ritual, Vana, Zama, Succinct)
+- **Hermes cluster:** `dstack-pha-prod9` — 2 certs issued, live since Sept 2025
+
+Individual app IDs are **not** visible in CT logs because clusters use wildcard certs. CT enumeration works for custom domains only.
 
 ---
 
@@ -52,6 +150,8 @@ key_provider:   kms (Phala)
 2. Exfiltrate data
 3. Redeploy legitimate code
 4. No evidence trail exists
+
+**Confirmed 2026-02-20:** The compose hash changed between Feb 10 and Feb 20 (image `126d663` → `a3cf0e6`). No public record of when this upgrade occurred.
 
 **Fix:** Switch to Base on-chain KMS. From xordi docs:
 > "To be publicly visible you need to use onchain kms... The pha kms is reserved for other customers who don't want to publish the update events"
@@ -70,14 +170,14 @@ This creates an on-chain record for every compose hash update.
 
 **Problem:** Current compose references image by git tag:
 ```yaml
-image: docker.io/generalsemantics/hermes:126d663
+image: docker.io/generalsemantics/hermes:a3cf0e6
 ```
 
 **Impact:** The tag can be overwritten. The attestation includes `compose_hash` but not the Docker image digest directly.
 
 **Fix:** Pin to digest in compose:
 ```yaml
-image: docker.io/generalsemantics/hermes@sha256:5dc4f101c5f031710ca53fee97c57336b1b5f85d8044bdaa4d19031196a1466e
+image: docker.io/generalsemantics/hermes@sha256:6df5258940ac2a705d77f0a4c045efcf215b1e25b8eed737d0705552b3a31c3a
 ```
 
 **Note:** dstack-ingress already does this correctly:
@@ -169,6 +269,21 @@ env:
 
 ---
 
+### 7. Custom Domain Binding Not Verifiable (NEW)
+
+**Problem:** `hermes.teleport.computer` is mapped to app_id `db82f5...` via a mutable DNS TXT record (`_dstack-app-address`). This binding is not attested, not logged on-chain, and can be changed silently by the domain owner.
+
+**Impact:** Even with Base KMS logging compose hash changes, the domain layer is a separate trust gap. A domain redirect attack leaves no on-chain evidence.
+
+**Mitigations available today:**
+- CT monitoring for `hermes.teleport.computer` (alerts on new cert issuance)
+- DNS monitoring for `_dstack-app-address.hermes.teleport.computer` TXT record changes
+- Periodic attestation checks via `/evidences/` endpoint
+
+**Proper fix (requires dstack protocol change):** On-chain domain→appid binding enforced by the attested gateway. See [DOMAIN-BINDING-GAP.md](../../framework/DOMAIN-BINDING-GAP.md).
+
+---
+
 ## HTTP Layer Issues (Lower Priority)
 
 Also identified during audit - not TEE-specific but worth fixing:
@@ -238,8 +353,9 @@ Verified from logs:
 |----------|--------|
 | Upgrade history | ❌ Not exposed |
 | Previous compose hashes | ❌ Not stored publicly |
-| When `126d663` was deployed | ❌ Unknown |
+| When `a3cf0e6` was deployed | ❌ Unknown |
 | What version ran on Jan 20th | ❌ Cannot answer |
+| Domain binding history | ❌ Not tracked |
 
 **The Trust Center only shows current state, not history.** The `updated` timestamp tells us *something* changed on 2026-02-10, but not what previous versions ran or when.
 
@@ -265,16 +381,21 @@ With Base KMS, every `phala cvms upgrade` emits an on-chain event with the new c
 1. [ ] Switch to Base on-chain KMS
 2. [ ] Pin Docker image by digest in compose
 3. [ ] Create VERIFICATION-REPORT.md
+4. [ ] Set up CT monitoring for `hermes.teleport.computer`
 
 ### Short-Term
-4. [ ] Pin base images in Dockerfile
-5. [ ] Migrate to GHCR
-6. [ ] Add release checklist
+5. [ ] Pin base images in Dockerfile
+6. [ ] Migrate to GHCR
+7. [ ] Add release checklist
+8. [ ] Set up DNS monitoring for `_dstack-app-address` TXT record
 
 ### Medium-Term
-7. [ ] Achieve fully reproducible builds
-8. [ ] Document upgrade history on-chain
-9. [ ] Add `USER node` to Dockerfile
+9. [ ] Achieve fully reproducible builds
+10. [ ] Document upgrade history on-chain
+11. [ ] Add `USER node` to Dockerfile
+
+### Requires dstack Protocol Change
+12. [ ] On-chain domain→appid binding (see [DOMAIN-BINDING-GAP.md](../../framework/DOMAIN-BINDING-GAP.md))
 
 ---
 
@@ -299,13 +420,33 @@ COMPOSE HASH ◄──────────── ATTESTATION (port 8090)
        ▼                          ▼
 BASE CONTRACT ◄──────────── INTEL TDX
 (transparency log)          (hardware root)
+       │
+       │ ← MISSING: domain binding
+       ▼
+CUSTOM DOMAIN (hermes.teleport.computer)
+       │
+       │ DNS TXT → app_id (mutable, unlogged)
+       ▼
+USER BROWSER
 ```
+
+---
+
+## Audit Log
+
+| Date | Event |
+|------|-------|
+| 2026-02-10 | Initial audit. compose_hash `7bd518...`, image `hermes:126d663` |
+| 2026-02-20 | Follow-up. compose_hash changed to `a81059...`, image now `hermes:a3cf0e6`. CT log analysis: 4 certs issued (Dec 31 – Jan 2), no new issuance since. DNS analysis: domain binding via mutable TXT record. Identified domain-binding architectural gap in dstack. |
 
 ---
 
 ## References
 
-- [Trust Center](https://trust.phala.com/app/db82f581256a3c9244c4d7129a67336990d08cdf) (if exists)
+- [Trust Center](https://trust.phala.com/app/db82f581256a3c9244c4d7129a67336990d08cdf)
 - [8090 Metadata](https://db82f581256a3c9244c4d7129a67336990d08cdf-8090.dstack-pha-prod9.phala.network/)
+- [CT Logs for hermes.teleport.computer](https://crt.sh/?q=hermes.teleport.computer)
+- [Domain Binding Gap Analysis](../../framework/DOMAIN-BINDING-GAP.md)
 - [xordi-release-process](https://github.com/Account-Link/xordi-release-process/)
 - [dstack Verification Docs](https://docs.phala.com/dstack/verification)
+- [dstack Zero-Trust TLS Whitepaper](https://docs.phala.com/dstack/design-documents/whitepaper#zero-trust-tls-protocol)

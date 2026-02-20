@@ -64,6 +64,7 @@ See [LEARNINGS.md](LEARNINGS.md) for detailed patterns.
 
 ## Framework
 
+- [DOMAIN-BINDING-GAP.md](framework/DOMAIN-BINDING-GAP.md) - Custom domain routing gap (affects all dstack apps)
 - [STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) - How to verify Stage 1
 - [templates/DEVPROOF-REPORT.md](framework/templates/DEVPROOF-REPORT.md) - Gap analysis template
 - [templates/DEPLOYMENTS.md](framework/templates/DEPLOYMENTS.md) - Upgrade history template
