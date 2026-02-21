@@ -46,7 +46,7 @@ See [framework/STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) for detaile
 | [primus](case-studies/primus/) | 0 | Closed-source core (`libpado.so`), binary blobs |
 | [talos](case-studies/talos/) | ~1 | Reproducible builds, but enclave ID verification gap |
 | [tee-totalled](case-studies/tee-totalled/) | 0 | `LLM_BASE_URL` operator-configurable (exfiltration) |
-| [tokscope-xordi](case-studies/tokscope-xordi/) | 0 | `XORDI_API_URL` operator-configurable, fallback encryption key |
+| [tokscope-xordi](case-studies/tokscope-xordi/) | 0 | v1.1.2: images public, repro builds improved; still `${VAR}` image refs, Pha KMS |
 | [confer.to](case-studies/confer/) | 0 | Analysis in progress |
 | [xordi-toy-example](case-studies/xordi-toy-example/) | **1** | Reference implementation with Base KMS |
 
