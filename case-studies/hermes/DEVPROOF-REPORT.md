@@ -13,7 +13,9 @@
 
 Hermes runs in a TEE on Phala Cloud with solid architecture for protecting secrets and pending entries. However, several gaps exist in the **verification chain** and **transparency logging** that prevent users from independently auditing what code has run.
 
-**2026-02-20 update:** The compose hash has changed since the initial audit, confirming active upgrades with no public record. CT log and DNS analysis provides baseline data for ongoing monitoring. A new architectural gap was identified in the custom domain routing layer (see [DOMAIN-BINDING-GAP.md](../../framework/DOMAIN-BINDING-GAP.md)).
+**2026-02-20 update:** The compose hash has changed since the initial audit, confirming active upgrades with no public record. CT log and DNS analysis provides baseline data for ongoing monitoring.
+
+**2026-02-22 correction:** The domain binding "gap" previously reported was overstated. CT logging is mandatory for all publicly trusted certs, so domain redirect attacks are always detectable. See [corrected analysis](../../framework/DOMAIN-BINDING-GAP.md).
 
 | Category | Status | Notes |
 |----------|--------|-------|
@@ -23,7 +25,7 @@ Hermes runs in a TEE on Phala Cloud with solid architecture for protecting secre
 | Reproducible Builds | ❌ FAIL | Unpinned base images, npm ci |
 | Source-to-Image Chain | ⚠️ PARTIAL | SHA tags exist but image not pinned by digest |
 | Upgrade History | ❌ FAIL | No record of which versions deployed when |
-| Domain Binding | ⚠️ NEW | Custom domain routed via mutable DNS TXT record |
+| Domain Binding | ✅ PASS | Custom domain redirect detectable via mandatory CT logging |
 
 ---
 
@@ -269,18 +271,52 @@ env:
 
 ---
 
-### 7. Custom Domain Binding Not Verifiable (NEW)
+### 7. Custom Domain Trust Model (CORRECTED 2026-02-22)
 
-**Problem:** `hermes.teleport.computer` is mapped to app_id `db82f5...` via a mutable DNS TXT record (`_dstack-app-address`). This binding is not attested, not logged on-chain, and can be changed silently by the domain owner.
+**~~Original finding (retracted):~~** Previously reported as a domain binding "gap" where redirect attacks leave no evidence.
 
-**Impact:** Even with Base KMS logging compose hash changes, the domain layer is a separate trust gap. A domain redirect attack leaves no on-chain evidence.
+**Corrected analysis:** A domain redirect attack requires the attacker to obtain a new TLS cert (the old cert's private key is locked in the original TEE's encrypted volume). All publicly trusted CAs must log to CT. Therefore domain redirect attacks are **always detectable** via CT monitoring.
 
-**Mitigations available today:**
-- CT monitoring for `hermes.teleport.computer` (alerts on new cert issuance)
-- DNS monitoring for `_dstack-app-address.hermes.teleport.computer` TXT record changes
-- Periodic attestation checks via `/evidences/` endpoint
+**Trust tiers:**
+- **Browser users:** CT monitoring detects redirect attacks (set up Certspotter alerts for `hermes.teleport.computer`)
+- **Client SDKs:** Should perform attested TLS, making the domain just a discovery mechanism
 
-**Proper fix (requires dstack protocol change):** On-chain domain→appid binding enforced by the attested gateway. See [DOMAIN-BINDING-GAP.md](../../framework/DOMAIN-BINDING-GAP.md).
+**Inherent limit:** The domain registrar can seize `teleport.computer`. This is the standard DNS trust boundary, not a dstack-specific issue.
+
+See [Custom Domain Trust Model](../../framework/DOMAIN-BINDING-GAP.md) for full analysis.
+
+---
+
+### 8. Evidences Are Ephemeral (NEW 2026-02-22)
+
+**Problem:** The `/evidences/` endpoint only serves current state. On redeploy, the old `quote.json`, cert PEM, and `sha256sum.txt` are overwritten. No history is preserved.
+
+**What `/evidences/` contains:**
+
+| File | Purpose |
+|------|---------|
+| `quote.json` | TDX attestation quote; `report_data` = SHA256(sha256sum.txt) |
+| `sha256sum.txt` | Manifest: SHA256 of acme-account.json + cert PEM |
+| `cert-hermes.teleport.computer.pem` | TLS cert (public key bound to quote via manifest) |
+| `acme-account.json` | ACME account URI (LE acct 2928213986) |
+
+**Binding chain:** TDX Quote → report_data → SHA256(manifest) → SHA256(cert PEM) → TLS public key. This proves the TLS cert was issued from inside this TEE. Note: this uses a custom path (plain SHA256, zero-padded), not dstack's standard `QuoteContentType::RaTlsCert` (SHA512-tagged).
+
+**Impact:** Even with Base KMS logging compose_hash changes on-chain, the TLS cert attestation binding is lost on redeploy. An auditor cannot verify which TLS cert was attested at a previous point in time.
+
+**Fix:** Commit evidences to git on every redeploy:
+```
+evidences/
+  2026-01-02/
+    quote.json
+    sha256sum.txt
+    cert-hermes.teleport.computer.pem
+    acme-account.json
+  2026-02-18/
+    ...
+```
+
+This is complementary to Base KMS: on-chain gives you compose_hash history, git gives you the full attestation artifacts.
 
 ---
 
@@ -382,20 +418,21 @@ With Base KMS, every `phala cvms upgrade` emits an on-chain event with the new c
 2. [ ] Pin Docker image by digest in compose
 3. [ ] Create VERIFICATION-REPORT.md
 4. [ ] Set up CT monitoring for `hermes.teleport.computer`
+5. [ ] Commit `/evidences/` snapshots to git on every redeploy (quote.json, sha256sum.txt, cert PEM, acme-account.json)
 
 ### Short-Term
-5. [ ] Pin base images in Dockerfile
-6. [ ] Migrate to GHCR
-7. [ ] Add release checklist
-8. [ ] Set up DNS monitoring for `_dstack-app-address` TXT record
+6. [ ] Pin base images in Dockerfile
+7. [ ] Migrate to GHCR
+8. [ ] Add release checklist
+9. [ ] Set up DNS monitoring for `_dstack-app-address` TXT record
 
 ### Medium-Term
 9. [ ] Achieve fully reproducible builds
 10. [ ] Document upgrade history on-chain
 11. [ ] Add `USER node` to Dockerfile
 
-### Requires dstack Protocol Change
-12. [ ] On-chain domain→appid binding (see [DOMAIN-BINDING-GAP.md](../../framework/DOMAIN-BINDING-GAP.md))
+### Optional Enhancement
+12. [ ] Embed app_id in TLS certs for richer CT audit trail (see [Custom Domain Trust Model](../../framework/DOMAIN-BINDING-GAP.md))
 
 ---
 
@@ -421,13 +458,13 @@ COMPOSE HASH ◄──────────── ATTESTATION (port 8090)
 BASE CONTRACT ◄──────────── INTEL TDX
 (transparency log)          (hardware root)
        │
-       │ ← MISSING: domain binding
+       │
        ▼
 CUSTOM DOMAIN (hermes.teleport.computer)
        │
-       │ DNS TXT → app_id (mutable, unlogged)
+       │ DNS TXT → app_id (mutable, but redirect requires new cert → CT logged)
        ▼
-USER BROWSER
+USER BROWSER (CT monitoring) / CLIENT SDK (attested TLS)
 ```
 
 ---
@@ -437,7 +474,8 @@ USER BROWSER
 | Date | Event |
 |------|-------|
 | 2026-02-10 | Initial audit. compose_hash `7bd518...`, image `hermes:126d663` |
-| 2026-02-20 | Follow-up. compose_hash changed to `a81059...`, image now `hermes:a3cf0e6`. CT log analysis: 4 certs issued (Dec 31 – Jan 2), no new issuance since. DNS analysis: domain binding via mutable TXT record. Identified domain-binding architectural gap in dstack. |
+| 2026-02-20 | Follow-up. compose_hash changed to `a81059...`, image now `hermes:a3cf0e6`. CT log analysis: 4 certs issued (Dec 31 – Jan 2), no new issuance since. DNS analysis: domain binding via mutable TXT record. Originally identified as "domain-binding architectural gap." |
+| 2026-02-22 | Retraction: domain binding "gap" was overstated. CT logging is mandatory for all publicly trusted certs, so domain redirect attacks always produce evidence. Reframed as trust model description with two tiers (browser/CT vs client SDK/attested TLS). New finding: `/evidences/` are ephemeral — quote.json and cert PEM overwritten on redeploy. report_data binding chain verified: TDX Quote → SHA256(manifest) → SHA256(cert PEM) → TLS pubkey. Recommend committing evidences to git on every release. |
 
 ---
 
