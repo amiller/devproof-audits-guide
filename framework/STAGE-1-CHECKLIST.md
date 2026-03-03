@@ -11,9 +11,10 @@ From ERC-733. **Fail any requirement = Stage 0.**
 
 **How to verify:**
 ```bash
-# Check KMS type in compose
-grep -i "kms:" docker-compose.yml
-# Should be: x-dstack: kms: base
+# Check KMS type in the app-compose.json manifest (visible at 8090 metadata endpoint)
+curl -s "https://$INSTANCE_ID-8090.$CLUSTER.phala.network/" | jq '.tcb_info.app_compose.key_provider'
+# Should be: "kms" (remote KMS). Note: "Base KMS" (on-chain transparency) is a
+# higher-level system built on top — verify by checking for on-chain compose hash registry.
 
 # Query on-chain registry for compose hash history
 cast call $APP_CONTRACT "getComposeHashes()" --rpc-url $BASE_RPC
@@ -134,11 +135,18 @@ environment:
 ```yaml
 environment:
   - API_URL=${API_URL}  # Operator can override
+```
 
-# OR in allowed_envs
-x-dstack:
-  allowed_envs:
-    - API_URL  # Operator can set at runtime
+```json
+// OR in the app-compose.json manifest (not in docker-compose.yml itself):
+{
+  "allowed_envs": ["API_URL"]  // Operator can set at deploy time
+}
+```
+
+Check allowed_envs via the 8090 metadata endpoint:
+```bash
+curl -s "https://$INSTANCE_ID-8090.$CLUSTER.phala.network/" | jq '.tcb_info.app_compose.allowed_envs'
 ```
 
 ---
@@ -153,9 +161,10 @@ Run this to get a quick Stage assessment:
 
 echo "=== DevProof Stage 1 Quick Check ==="
 
-# 1. KMS Type
+# 1. KMS Type (check 8090 metadata, not docker-compose.yml)
 echo -n "KMS Type: "
-grep -q "kms: base" docker-compose.yml && echo "✅ Base (on-chain)" || echo "❌ Not Base"
+KP=$(curl -s "https://$INSTANCE_ID-8090.$CLUSTER.phala.network/" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tcb_info',{}).get('app_compose',{}).get('key_provider','unknown'))" 2>/dev/null)
+[ "$KP" = "kms" ] && echo "✅ KMS enabled (verify on-chain registry for Base transparency)" || echo "❌ key_provider: $KP"
 
 # 2. Image Pinning
 echo -n "Image Pinning: "

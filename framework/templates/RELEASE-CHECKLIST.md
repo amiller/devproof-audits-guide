@@ -41,7 +41,7 @@ docker buildx build \
 - [ ] Image uses digest (not tag): `image: yourorg/app@sha256:...`
 - [ ] No `${VAR}` for URLs that handle user data
 - [ ] Review `allowed_envs` - no security-sensitive variables
-- [ ] KMS set to `base` for transparency: `x-dstack: kms: base`
+- [ ] KMS enabled with on-chain transparency (verify `key_provider: "kms"` in app-compose.json manifest + on-chain compose hash registry)
 
 ---
 

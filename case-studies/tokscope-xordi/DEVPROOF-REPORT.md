@@ -129,7 +129,7 @@ Deployment is on `dstack-pha-prod9.phala.network` using Pha KMS. No on-chain upg
 
 **Status:** Unchanged. Cannot answer "what compose hash was running on Feb 15?"
 
-**Fix:** Migrate to Base KMS (`x-dstack: kms: base`).
+**Fix:** Migrate to Base KMS (on-chain compose hash registry) for public upgrade transparency. KMS type is set via the `app-compose.json` manifest (`key_provider` field), not in docker-compose.yml.
 
 ---
 
