@@ -107,11 +107,37 @@ def fetch_url(url: str) -> tuple[str, dict[str, str]]:
         return resp.read().decode("utf-8", errors="replace"), {k.lower(): v for k, v in resp.headers.items()}
 
 
+def _try_parse_json(value: str) -> dict | None:
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        start = value.find("{")
+        end = value.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(value[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
 def extract_tcb_info(body: str) -> dict | None:
-    start = body.find("<textarea readonly>")
-    end = body.find("</textarea>", start)
-    if start >= 0 and end >= 0:
-        return json.loads(html.unescape(body[start + len("<textarea readonly>"):end]))
+    candidates: list[str] = []
+    for match in re.finditer(r"<textarea[^>]*>(.*?)</textarea>", body, re.DOTALL | re.IGNORECASE):
+        candidates.append(match.group(1))
+    for match in re.finditer(r"<pre[^>]*>(.*?)</pre>", body, re.DOTALL | re.IGNORECASE):
+        candidates.append(match.group(1))
+    for match in re.finditer(r"<code[^>]*>(.*?)</code>", body, re.DOTALL | re.IGNORECASE):
+        candidates.append(match.group(1))
+
+    for raw in candidates:
+        text = html.unescape(raw).strip()
+        data = _try_parse_json(text)
+        if not data:
+            continue
+        if any(key in data for key in ("compose_hash", "app_compose", "mrtd", "rtmr0")):
+            return data
     return None
 
 
@@ -362,11 +388,12 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
     candidates: list[str] = []
     if attestation_url:
         candidates.append(attestation_url)
-    if app_id and cluster_domain:
-        candidates.append(f"https://{app_id}-8090.{cluster_domain}/")
-    if match:
-        candidates.append(f"https://{match.group(1)}-8090.{match.group(4)}/")
-    candidates.extend([url.rstrip("/") + suffix for suffix in ["/attestation", "/attestation/report", "/v1/attestation/report", "/.well-known/attestation", "/quote"]])
+    else:
+        if app_id and cluster_domain:
+            candidates.append(f"https://{app_id}-8090.{cluster_domain}/")
+        if match:
+            candidates.append(f"https://{match.group(1)}-8090.{match.group(4)}/")
+        candidates.extend([url.rstrip("/") + suffix for suffix in ["/attestation", "/attestation/report", "/v1/attestation/report", "/.well-known/attestation", "/quote"]])
     seen: set[str] = set()
     cert_norm = normalize_fingerprint(facts.cert_fingerprint)
     for candidate in candidates:

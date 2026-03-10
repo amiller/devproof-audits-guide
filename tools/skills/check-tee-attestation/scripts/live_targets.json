@@ -1,0 +1,100 @@
+﻿{
+  "generated_at": "2026-03-10",
+  "source": "project-internal references only",
+  "targets": [
+    {
+      "name": "near-private-chat",
+      "repo": "case-studies/near-private-chat",
+      "repo_urls": [
+        "https://github.com/nearai/chat-api",
+        "https://github.com/nearai/cloud-api",
+        "https://github.com/nearai/dstack-ingress-vpc",
+        "https://github.com/nearai/dstack-vpc",
+        "https://github.com/Dstack-TEE/dstack"
+      ],
+      "url": "https://private.near.ai",
+      "attestation_url": "https://private.near.ai/v1/attestation/report",
+      "extra_attestation_urls": [
+        "https://private.near.ai/evidences/",
+        "https://cloud-api.near.ai/v1/attestation/report"
+      ],
+      "source_files": [
+        "case-studies/near-private-chat/NEAR-PRIVATE-CHAT-REPRODUCTION.md",
+        "case-studies/near-private-chat/DEVPROOF-REPORT.md"
+      ]
+    },
+    {
+      "name": "hermes",
+      "repo": "case-studies/hermes",
+      "notes": "Source repo not identified in case study; only image tags and Trust Center references are present.",
+      "url": "https://hermes.teleport.computer",
+      "attestation_url": "https://db82f581256a3c9244c4d7129a67336990d08cdf-8090.dstack-pha-prod9.phala.network/",
+      "trust_center_url": "https://trust.phala.com/app/db82f581256a3c9244c4d7129a67336990d08cdf",
+      "source_files": [
+        "case-studies/hermes/DEVPROOF-REPORT.md"
+      ]
+    },
+    {
+      "name": "tokscope-xordi",
+      "repo": "case-studies/tokscope-xordi",
+      "repo_path": "D:/项目/工作/tk/repos/dstack-tutorial/tmp/teleport-tokscope",
+      "repo_url": "https://github.com/Account-Link/teleport-tokscope",
+      "repo_branch": "tokscope-xordi",
+      "repo_commit": "535fba0",
+      "url": "https://f44389ef4e953f3c53847cc86b1aedc763978e83-8090.dstack-pha-prod9.phala.network/",
+      "trust_center_url": "https://trust.phala.com/app/f44389ef4e953f3c53847cc86b1aedc763978e83",
+      "release_status_url": "https://release.xordi.io/",
+      "source_files": [
+        "case-studies/tokscope-xordi/DEVPROOF-REPORT.md",
+        "case-studies/tokscope-xordi/SESSION-NOTES.md"
+      ]
+    },
+    {
+      "name": "xordi-toy-example",
+      "repo": "case-studies/xordi-toy-example",
+      "repo_url": "https://github.com/Account-Link/xordi-release-process",
+      "repo_subdir": "toy-example-app",
+      "url": "https://f9d35f495ff3592771e73a528f4fc5737e30224b-8090.dstack-base-prod9.phala.network/",
+      "source_files": [
+        "case-studies/xordi-toy-example/DEVPROOF-REPORT.md"
+      ]
+    },
+    {
+      "name": "confer",
+      "repo": "case-studies/confer",
+      "repo_urls": [
+        "https://github.com/conferlabs/confer-proxy",
+        "https://github.com/conferlabs/confer-image"
+      ],
+      "url": "https://api.confer.to",
+      "notes": "REST API mentioned; no explicit HTTP attestation endpoint found in repo (attestation described as Noise handshake payload).",
+      "source_files": [
+        "case-studies/confer/DEVPROOF-REPORT.md"
+      ]
+    }
+  ],
+  "missing_targets": [
+    {
+      "name": "primus",
+      "repo": "case-studies/primus",
+      "repo_urls": [
+        "https://github.com/primus-labs/zktls-contracts",
+        "https://github.com/primus-labs/zktls-core-sdk",
+        "https://github.com/primus-labs/primus-extension"
+      ],
+      "reason": "No live URL or attestation endpoint found in repo; attestor-node source not public."
+    },
+    {
+      "name": "talos",
+      "repo": "case-studies/talos",
+      "repo_url": "https://github.com/talos-agent/talos",
+      "reason": "No live URL or attestation endpoint found in repo"
+    },
+    {
+      "name": "tee-totalled",
+      "repo": "case-studies/tee-totalled",
+      "repo_url": "https://github.com/sangaline/tee-totalled",
+      "reason": "No live URL or attestation endpoint found in repo"
+    }
+  ]
+}
