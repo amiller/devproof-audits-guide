@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Foundry
+cache/
+out/
+
+# IDE
+.claude/
+.vscode/
+.idea/
+
+# Secrets
+.env
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.swp
+*~
+\#*\#
+lib/
+refs/

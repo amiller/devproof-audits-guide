@@ -1,0 +1,6 @@
+interface:
+  display_name: "Check TEE Attestation"
+  short_description: "Audit a repo plus live website for DevProof and TEE trust gaps."
+  default_prompt: "Use $check-tee-attestation to assess whether a GitHub repo and deployed website are safe to trust under the dstack DevProof model."
+policy:
+  allow_implicit_invocation: true
