@@ -211,6 +211,12 @@ def main() -> int:
                     lines.append(f"- {item}")
             else:
                 lines.append(f"- {check.get('summary', 'No evidence captured.')}")
+        if isinstance(data.get("live"), dict):
+            notes = data["live"].get("notes") or []
+            if notes:
+                lines.append("Live fetch notes:")
+                for note in notes[:6]:
+                    lines.append(f"- {note}")
 
         next_step = None
         for status in ("fail", "warn"):

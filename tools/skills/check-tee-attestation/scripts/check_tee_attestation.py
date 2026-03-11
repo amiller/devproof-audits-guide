@@ -216,6 +216,17 @@ def analyze_app_compose(facts: LiveFacts, app_compose: str, component: str) -> N
         facts.pre_launch_script_present = True
 
 
+def compute_compose_hash(app_compose: str) -> str | None:
+    try:
+        compose_obj = json.loads(app_compose)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(compose_obj, dict):
+        return None
+    canonical = json.dumps(compose_obj, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def relpath(path: Path, root: Path) -> str:
     return str(path.relative_to(root)).replace("\\", "/")
 
@@ -439,14 +450,19 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
                 resolved_app_id = parsed_host["app_id"]
                 resolved_cluster = parsed_host["cluster"]
                 facts.notes.append(f"resolved _dstack-app-address to {resolved_host}")
+    def cluster_host(value: str) -> str:
+        return value if value.endswith(".phala.network") else f"{value}.phala.network"
+
     candidates: list[str] = []
     if attestation_url:
         candidates.append(attestation_url)
     else:
+        if url:
+            candidates.append(url)
         if resolved_app_id and resolved_cluster:
-            candidates.append(f"https://{resolved_app_id}-8090.{resolved_cluster}/")
+            candidates.append(f"https://{resolved_app_id}-8090.{cluster_host(resolved_cluster)}/")
         if match:
-            candidates.append(f"https://{match.group(1)}-8090.{match.group(4)}/")
+            candidates.append(f"https://{match.group(1)}-8090.{cluster_host(match.group(4))}/")
         candidates.extend([url.rstrip("/") + suffix for suffix in ["/attestation", "/attestation/report", "/v1/attestation/report", "/.well-known/attestation", "/quote"]])
     seen: set[str] = set()
     cert_norm = normalize_fingerprint(facts.cert_fingerprint)
@@ -467,14 +483,17 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
         facts.attestation_body = body
         if "html" in headers.get("content-type", "") or body.lstrip().startswith("<"):
             tcb = extract_tcb_info(body)
-            if tcb and isinstance(tcb.get("app_compose"), str):
-                facts.compose_hash = tcb.get("compose_hash")
-                facts.computed_compose_hash = hashlib.sha256(tcb["app_compose"].encode("utf-8")).hexdigest()
-                facts.compose_hash_match = facts.compose_hash == facts.computed_compose_hash if facts.compose_hash else None
-                if cert_norm and cert_norm in normalize_fingerprint(tcb["app_compose"]):
-                    facts.tls_binding_match = True
-                analyze_app_compose(facts, tcb["app_compose"], "tcb_info")
-                break
+            if tcb:
+                tcb_info = tcb.get("tcb_info") if isinstance(tcb.get("tcb_info"), dict) else tcb
+                app_compose = tcb_info.get("app_compose") if isinstance(tcb_info, dict) else None
+                if isinstance(app_compose, str):
+                    facts.compose_hash = tcb_info.get("compose_hash") if isinstance(tcb_info, dict) else None
+                    facts.computed_compose_hash = compute_compose_hash(app_compose)
+                    facts.compose_hash_match = facts.compose_hash == facts.computed_compose_hash if facts.compose_hash else None
+                    if cert_norm and cert_norm in normalize_fingerprint(app_compose):
+                        facts.tls_binding_match = True
+                    analyze_app_compose(facts, app_compose, "tcb_info")
+                    break
         else:
             try:
                 payload = json.loads(body)
@@ -554,7 +573,19 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None) -> list[Check]:
                 operator_evidence.append("pre_launch_script present in live app_compose")
         operator_status = merge_status(operator_status_repo, operator_status_live)
         add_check(checks, "operator_gap", "Operator gap", operator_status, "The operator still appears able to steer code, routing, or key material." if operator_status == "fail" else "There are signs that mutable runtime configuration still matters." if operator_status == "warn" else "No obvious operator-controlled URL, image, or key gap was found.", operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
-        attestation_status = "pass" if live and live.attestation_found and live.compose_hash_match else "warn" if repo.attestation_hits and repo.binding_hits else "fail"
+        if live and live.attestation_found:
+            attestation_status = "pass" if live.compose_hash_match else "warn"
+        elif repo.attestation_hits and repo.binding_hits:
+            attestation_status = "warn"
+        else:
+            attestation_status = "fail"
+        attestation_summary = (
+            "Live attestation evidence is reachable and coherent."
+            if attestation_status == "pass"
+            else "The repo contains attestation logic, but live verification is partial."
+            if attestation_status == "warn"
+            else "No convincing attestation path was found."
+        )
         attestation_evidence = repo.attestation_hits + repo.binding_hits
         if live and live.attestation_url:
             attestation_evidence.insert(0, f"attestation endpoint: {live.attestation_url}")
@@ -562,7 +593,11 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None) -> list[Check]:
             attestation_evidence.insert(1, f"compose hash: {live.compose_hash}")
         if live and live.attestation_components:
             attestation_evidence.insert(2, f"components: {', '.join(live.attestation_components[:4])}")
-        add_check(checks, "attestation", "Attestation", attestation_status, "Live attestation evidence is reachable and coherent." if attestation_status == "pass" else "The repo contains attestation logic, but live verification is partial." if attestation_status == "warn" else "No convincing attestation path was found.", attestation_evidence, "Expose a public attestation path or 8090 metadata for third-party verification.")
+        if live and live.notes and not live.attestation_found:
+            attestation_evidence.extend([f"live note: {note}" for note in live.notes[:3]])
+            summary_note = "; ".join(live.notes[:2])
+            attestation_summary = f"{attestation_summary} (parse/fetch issues: {summary_note})"
+        add_check(checks, "attestation", "Attestation", attestation_status, attestation_summary, attestation_evidence, "Expose a public attestation path or 8090 metadata for third-party verification.")
         upgrade_status = "pass" if repo.timelock_hits else "warn" if repo.upgrade_hits else "fail"
         add_check(checks, "upgrade_transparency", "Upgrade transparency", upgrade_status, "Timelock or upgrade-locking logic is visible." if upgrade_status == "pass" else "There is some upgrade machinery, but no clear notice period." if upgrade_status == "warn" else "No convincing public upgrade trail was found.", repo.timelock_hits + repo.upgrade_hits, "Use AppAuth or equivalent public upgrade authorization, and prefer timelocks.")
         hygiene_status = "fail" if len(repo.hygiene_hits) >= 4 else "warn" if repo.hygiene_hits else "pass"
