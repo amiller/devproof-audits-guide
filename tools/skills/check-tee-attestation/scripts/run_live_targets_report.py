@@ -34,6 +34,16 @@ CATEGORY_LABELS = {
     "code_hygiene": "Code Hygiene",
 }
 
+SIGNAL_EMOJI = {
+    "GREEN": "🟢",
+    "YELLOW": "🟡",
+    "RED": "🔴",
+}
+
+
+def color_signal(signal: str) -> str:
+    return SIGNAL_EMOJI.get(signal.upper(), signal)
+
 
 def is_url(value: str) -> bool:
     return value.startswith(("http://", "https://", "git@"))
@@ -54,10 +64,10 @@ def pick_repo(entry: dict) -> str | None:
         return repo_path
     if isinstance(repo_url, str) and repo_url:
         return repo_url
-    if isinstance(repo_urls, list) and len(repo_urls) == 1:
-        only = repo_urls[0]
-        if isinstance(only, str) and only:
-            return only
+    if isinstance(repo_urls, list) and repo_urls:
+        first = repo_urls[0]
+        if isinstance(first, str) and first:
+            return first
     return None
 
 
@@ -95,6 +105,9 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
     repo_commit = entry.get("repo_commit") if isinstance(entry.get("repo_commit"), str) else None
     cleanup_dir = None
     repo_note = None
+    repo_urls = entry.get("repo_urls") if isinstance(entry.get("repo_urls"), list) else None
+    if repo_urls and len(repo_urls) > 1:
+        repo_note = "multiple repo URLs provided; using the first entry"
 
     cmd = [sys.executable, str(SCRIPT_PATH), "--format", "json"]
     if isinstance(repo_value, str):
@@ -160,6 +173,20 @@ def main() -> int:
             repo_line += f" (note: {repo_note})"
         lines.append(repo_line)
         lines.append(f"Website: {url}")
+
+        one_glance = data.get("one_glance") or []
+        if one_glance:
+            lines.append("")
+            lines.append("One-Glance Card:")
+            lines.append("")
+            lines.append("| Dimension | Status | Signal | Evidence |")
+            lines.append("|---|---|---|---|")
+            for row in one_glance:
+                dimension = row.get("dimension", "")
+                status = row.get("status", "")
+                signal = color_signal(row.get("signal", ""))
+                evidence = (row.get("evidence") or "").replace("|", "\\|")
+                lines.append(f"| {dimension} | {status} | {signal} | {evidence} |")
 
         lines.append("")
         lines.append("Critical Blockers:")

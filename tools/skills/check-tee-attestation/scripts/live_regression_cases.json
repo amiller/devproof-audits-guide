@@ -10,5 +10,36 @@
       "Website TLS binding": "warn",
       "Upgrade transparency": "warn"
     }
+  },
+  {
+    "name": "hermes-custom-domain",
+    "repo": "case-studies/hermes",
+    "url": "https://hermes.teleport.computer",
+    "expected_stage": "Stage 0",
+    "expected_checks": {}
+  },
+  {
+    "name": "near-private-chat-multi-repo",
+    "repo_urls": [
+      "https://github.com/nearai/chat-api",
+      "https://github.com/nearai/cloud-api"
+    ],
+    "url": "https://private.near.ai",
+    "expected_stage": "Stage 0",
+    "expected_checks": {}
+  },
+  {
+    "name": "local-repo-path-example",
+    "repo": "case-studies/tokscope-xordi",
+    "url": "https://f44389ef4e953f3c53847cc86b1aedc763978e83-8090.dstack-pha-prod9.phala.network/",
+    "expected_stage": "Stage 0",
+    "expected_checks": {}
+  },
+  {
+    "name": "missing-attestation-url",
+    "repo": "case-studies/confer",
+    "url": "https://api.confer.to",
+    "expected_stage": "Unproven",
+    "expected_checks": {}
   }
 ]

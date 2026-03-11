@@ -23,6 +23,10 @@ def build_cmd(case: dict) -> list[str]:
     cmd = [sys.executable, str(SCRIPT_PATH), "--format", "json"]
     if case.get("repo"):
         cmd.extend(["--repo", resolve_repo_path(case["repo"])])
+    elif case.get("repo_urls"):
+        repo_urls = case.get("repo_urls")
+        if isinstance(repo_urls, list) and repo_urls:
+            cmd.extend(["--repo", repo_urls[0]])
     if case.get("url"):
         cmd.extend(["--url", case["url"]])
     if case.get("attestation_url"):

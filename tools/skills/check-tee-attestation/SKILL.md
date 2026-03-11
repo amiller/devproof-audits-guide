@@ -7,15 +7,14 @@ description: Assess whether a GitHub repository and deployed website are safe to
 
 ## Overview
 
-Evaluate a TEE application from the user or auditor perspective, not the operator perspective. Decide whether the deployment is merely security-looking or actually approaches DevProof by checking live attestation evidence, TLS binding, repo auditability, reproducibility, operator-controlled configuration, and upgrade transparency.
+Audit TEE applications from the auditor perspective. Focus on operator gap, attestation integrity, TLS binding, reproducibility, and upgrade transparency. The final report must be in English.
 
 ## Quick Start
 
-1. Normalize the target.
-If the user gives a GitHub URL, clone it before running checks.
-If the user gives a website, also ask for or discover an attestation endpoint, app ID, or dstack 8090 endpoint when possible.
+1. Normalize inputs.
+Accept GitHub URLs or local repo paths. Prefer live URLs; if only a custom domain is given, resolve `_dstack-app-address` to find the 8090 endpoint.
 
-2. Run the bundled checker.
+2. Run the checker.
 
 ```bash
 python scripts/check_tee_attestation.py --repo /path/to/repo --url https://target.example
@@ -26,63 +25,45 @@ Useful variants:
 ```bash
 python scripts/check_tee_attestation.py --repo https://github.com/org/repo --url https://app.example
 python scripts/check_tee_attestation.py --repo /path/to/repo --url https://app.example --attestation-url https://app.example/v1/attestation/report
-python scripts/check_tee_attestation.py --repo /path/to/repo --url https://<app-id>-443.dstack-pha-prod9.phala.network --format json
+python scripts/check_tee_attestation.py --repo /path/to/repo --url https://<app-id>-443.dstack-pha-prod9.phala.network --format markdown
+python scripts/check_tee_attestation.py --repo /path/to/repo --url https://app.example --evidence-dir evidences/
 ```
 
-3. Read the result as an auditor, not a scanner operator.
+3. Read the result as an auditor.
 The script gives a verdict, score, stage estimate, blockers, and evidence. Treat `Stage 1 candidate` as evidence-supported, not as a substitute for full manual review.
 
 4. Follow up with manual checks when the live target matters.
-Use [references/live-checks.md](./references/live-checks.md) for 8090 endpoint handling, attestation endpoint discovery, TLS fingerprint matching, and dstack-specific website patterns.
+Use [references/live-checks.md](./references/live-checks.md) and [references/plan-tee.md](./references/plan-tee.md).
 
-## Workflow
+## Workflow (7 Phases)
 
-### 1. Establish the trust question
+1. Threat model and trust claims.
+2. Attestation evidence collection (8090, Trust Center, Cloud API).
+3. Quote verification (dcap-qvl/manual parsing; compose_hash vs mr_config_id).
+4. TLS binding check (passthrough vs gateway; certFingerprint).
+5. Code audit for operator gap (allowed_envs, ${VAR} URLs, image pinning, KMS).
+6. Cross-reference deployed compose vs source.
+7. Evidence archiving for audit history.
 
-Answer the user's actual question in this form:
+## Output Requirements
 
-- What code is the website claiming to run?
-- Can an external auditor verify that claim from public evidence?
-- Is the website's TLS endpoint bound to attested code, or only to a conventional certificate?
-- Can the operator still change behavior with `allowed_envs`, mutable URLs, mutable image refs, or instant upgrades?
-- Does the evidence only support Stage 0 security, or does it approach Stage 1 DevProof?
+- Final report must be in English.
+- Include both:
+  - Formal audit sections (Executive Summary, Key Questions, Findings, Evidence).
+  - One-glance card (matrix + red/yellow/green signal).
 
-### 2. Check both sides of the system
-
-Do not stop at repo review. A TEE app can have clean source and still be ruggable in deployment.
-
-- Repo side: source availability, Dockerfiles, compose files, lockfiles, CI reproducibility flags, attestation logic, AppAuth or timelock code, secret or URL injection paths.
-- Website side: TLS certificate, live headers, attestation endpoint, dstack 8090 metadata, compose hash evidence, certificate fingerprint binding, obvious gateway patterns.
-
-### 3. Distinguish security from DevProof
-
-Use [references/devproof-stages.md](./references/devproof-stages.md) for the actual bar.
-
-- If you can see live attestation but the operator can still swap URLs, image digests, secrets, or upgrades, classify it as `Stage 0`, not `Stage 1`.
-- If reproducibility or upgrade transparency is missing, the app is not DevProof even when Trust Center is green.
-- If the website has TLS but no attested TLS or gateway proof, say so explicitly.
-
-### 4. Treat missing evidence as a real gap
-
-Do not silently assume that "probably hardcoded" or "likely public" is good enough.
-
-- If the repo is unavailable or incomplete, mark auditability down.
-- If the live website exposes no attestation evidence, mark attestation down.
-- If you cannot link the website certificate to attested code, mark TLS binding as partial or failed.
-- If upgrades are opaque, say the app remains operator-trusted.
-
-### 5. Produce an auditor-style answer
+## Reporting
 
 Always report:
 
-- `Verdict`: safe, partially safe, or not safe to trust under the DevProof model
-- `Stage`: unproven, Stage 0, or Stage 1 candidate
-- `Score`: weighted trust score from the checker
-- `Critical blockers`: the concrete reasons the app falls short
-- `Evidence`: direct repo paths, live endpoints, cert facts, or compose-hash facts
-- `Next step`: the shortest path to upgrade the app's trust model
+- Verdict: SAFE / PARTIAL / NOT SAFE
+- Stage: Unproven / Stage 0 / Stage 1 candidate
+- Score: weighted trust score
+- Critical blockers: concrete reasons the app falls short
+- Evidence: repo paths, endpoints, compose hash, TLS facts
+- Next step: shortest path to upgrade the trust model
 
-Use [references/report-template.md](./references/report-template.md) if you need a longer audit note.
+Use [references/report-template.md](./references/report-template.md) for the full output structure.
 
 ## Interpreting Results
 

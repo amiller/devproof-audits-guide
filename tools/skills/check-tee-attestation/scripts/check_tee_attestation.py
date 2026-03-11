@@ -25,6 +25,7 @@ IGNORE_DIRS = {".git", ".next", ".venv", "__pycache__", "build", "dist", "node_m
 LOCKFILES = {"Cargo.lock", "Gemfile.lock", "package-lock.json", "pnpm-lock.yaml", "poetry.lock", "requirements.lock", "uv.lock", "yarn.lock"}
 WEIGHTS = {"attestation": 20, "tls_binding": 15, "auditability": 15, "reproducibility": 15, "operator_gap": 20, "upgrade_transparency": 10, "code_hygiene": 5}
 STATUS_VALUE = {"pass": 1.0, "warn": 0.5, "fail": 0.0, "skip": 0.25}
+PHALA_HOST_RE = re.compile(r"^([a-f0-9]{40})-(\d+)(s?)\.([a-z0-9-]+)\.phala\.network$", re.IGNORECASE)
 
 
 @dataclass
@@ -71,11 +72,14 @@ class LiveFacts:
     tls_ok: bool = False
     tls_error: str | None = None
     cert_fingerprint: str | None = None
+    cert_pem: str | None = None
     cert_subject: str | None = None
     cert_issuer: str | None = None
     cert_not_after: str | None = None
     attestation_url: str | None = None
     attestation_found: bool = False
+    attestation_content_type: str | None = None
+    attestation_body: str | None = None
     compose_hash: str | None = None
     computed_compose_hash: str | None = None
     compose_hash_match: bool | None = None
@@ -352,10 +356,44 @@ def get_tls(url: str) -> dict[str, str | bool | None]:
         "tls_ok": tls_ok,
         "tls_error": tls_error,
         "cert_fingerprint": hashlib.sha256(der).hexdigest(),
+        "cert_pem": ssl.DER_cert_to_PEM_cert(der),
         "cert_subject": to_name(info.get("subject", ())),
         "cert_issuer": to_name(info.get("issuer", ())),
         "cert_not_after": info.get("notAfter"),
     }
+
+def parse_phala_host(host: str | None) -> dict | None:
+    if not host:
+        return None
+    match = PHALA_HOST_RE.match(host)
+    if not match:
+        return None
+    return {
+        "app_id": match.group(1),
+        "port": int(match.group(2)),
+        "tls_passthrough": bool(match.group(3)),
+        "cluster": match.group(4),
+    }
+
+
+def resolve_dstack_app(domain: str) -> str | None:
+    txt_host = f"_dstack-app-address.{domain}"
+    pattern = PHALA_HOST_RE
+    for cmd in (["dig", "+short", "TXT", txt_host], ["nslookup", "-type=txt", txt_host]):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=8)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        output = result.stdout or ""
+        match = pattern.search(output)
+        if match:
+            return match.group(0)
+        for line in output.splitlines():
+            line = line.strip().strip('"')
+            match = pattern.search(line)
+            if match:
+                return match.group(0)
+    return None
 
 
 def collect_live(url: str | None, attestation_url: str | None, app_id: str | None, cluster_domain: str | None) -> LiveFacts:
@@ -375,6 +413,7 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
             facts.tls_ok = bool(tls["tls_ok"])
             facts.tls_error = tls["tls_error"]  # type: ignore[assignment]
             facts.cert_fingerprint = tls["cert_fingerprint"]  # type: ignore[assignment]
+            facts.cert_pem = tls["cert_pem"]  # type: ignore[assignment]
             facts.cert_subject = tls["cert_subject"]  # type: ignore[assignment]
             facts.cert_issuer = tls["cert_issuer"]  # type: ignore[assignment]
             facts.cert_not_after = tls["cert_not_after"]  # type: ignore[assignment]
@@ -384,13 +423,28 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
     else:
         facts.tls_error = "website is not using HTTPS"
     host = parsed.hostname or ""
-    match = re.match(r"^([a-f0-9]{40})-(\d+)(s?)\.(.+)$", host)
+    match = PHALA_HOST_RE.match(host)
+    resolved_app_id = app_id
+    resolved_cluster = cluster_domain
+    if not resolved_app_id or not resolved_cluster:
+        parsed_host = parse_phala_host(host)
+        if parsed_host:
+            resolved_app_id = parsed_host["app_id"]
+            resolved_cluster = parsed_host["cluster"]
+    if (not resolved_app_id or not resolved_cluster) and host:
+        resolved_host = resolve_dstack_app(host)
+        if resolved_host:
+            parsed_host = parse_phala_host(resolved_host)
+            if parsed_host:
+                resolved_app_id = parsed_host["app_id"]
+                resolved_cluster = parsed_host["cluster"]
+                facts.notes.append(f"resolved _dstack-app-address to {resolved_host}")
     candidates: list[str] = []
     if attestation_url:
         candidates.append(attestation_url)
     else:
-        if app_id and cluster_domain:
-            candidates.append(f"https://{app_id}-8090.{cluster_domain}/")
+        if resolved_app_id and resolved_cluster:
+            candidates.append(f"https://{resolved_app_id}-8090.{resolved_cluster}/")
         if match:
             candidates.append(f"https://{match.group(1)}-8090.{match.group(4)}/")
         candidates.extend([url.rstrip("/") + suffix for suffix in ["/attestation", "/attestation/report", "/v1/attestation/report", "/.well-known/attestation", "/quote"]])
@@ -409,6 +463,8 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
             continue
         facts.attestation_found = True
         facts.attestation_url = candidate
+        facts.attestation_content_type = headers.get("content-type")
+        facts.attestation_body = body
         if "html" in headers.get("content-type", "") or body.lstrip().startswith("<"):
             tcb = extract_tcb_info(body)
             if tcb and isinstance(tcb.get("app_compose"), str):
@@ -417,6 +473,7 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
                 facts.compose_hash_match = facts.compose_hash == facts.computed_compose_hash if facts.compose_hash else None
                 if cert_norm and cert_norm in normalize_fingerprint(tcb["app_compose"]):
                     facts.tls_binding_match = True
+                analyze_app_compose(facts, tcb["app_compose"], "tcb_info")
                 break
         else:
             try:
@@ -554,6 +611,53 @@ def summarize(checks: list[Check], live: LiveFacts | None) -> dict:
     return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers}
 
 
+def status_to_matrix(status: str) -> tuple[str, str]:
+    if status == "pass":
+        return "PASS", "GREEN"
+    if status == "fail":
+        return "FAIL", "RED"
+    return "PARTIAL", "YELLOW"
+
+
+def signal_to_emoji(signal: str) -> str:
+    if signal == "GREEN":
+        return "🟢"
+    if signal == "YELLOW":
+        return "🟡"
+    if signal == "RED":
+        return "🔴"
+    return signal
+
+
+def build_one_glance(checks: list) -> list[dict[str, str]]:
+    def to_category(check) -> str:
+        return check.get("category") if isinstance(check, dict) else check.category
+
+    def to_status(check) -> str:
+        return check.get("status") if isinstance(check, dict) else check.status
+
+    def to_evidence(check) -> list[str]:
+        return check.get("evidence", []) if isinstance(check, dict) else check.evidence
+
+    by_category = {to_category(c): c for c in checks}
+    dimensions = [
+        ("operator_gap", "Operator gap (can operator exfiltrate?)"),
+        ("attestation", "Attestation integrity"),
+        ("tls_binding", "TLS binding"),
+        ("reproducibility", "Build reproducibility"),
+        ("upgrade_transparency", "Upgrade transparency"),
+    ]
+    rows: list[dict[str, str]] = []
+    for key, label in dimensions:
+        check = by_category.get(key)
+        status = to_status(check) if check else "skip"
+        status_label, signal = status_to_matrix(status)
+        evidence_list = to_evidence(check) if check else []
+        evidence = (evidence_list[0] if evidence_list else "").strip()
+        rows.append({"dimension": label, "status": status_label, "signal": signal, "evidence": evidence})
+    return rows
+
+
 def render_text(payload: dict) -> str:
     summary = payload["summary"]
     lines = [f"Verdict: {summary['verdict']}", f"Stage:   {summary['stage']}", f"Score:   {summary['score']}/100"]
@@ -561,6 +665,11 @@ def render_text(payload: dict) -> str:
         lines.append(f"Repo:    {payload['repo']['target']}")
     if payload["live"]:
         lines.append(f"Website: {payload['live']['url']}")
+    lines.append("")
+    lines.append("One-glance card:")
+    for row in build_one_glance(payload["checks"]):
+        evidence = f" | {row['evidence']}" if row["evidence"] else ""
+        lines.append(f"- {row['dimension']}: {row['status']} / {signal_to_emoji(row['signal'])}{evidence}")
     if summary["critical_blockers"]:
         lines.append("Critical blockers:")
         for blocker in summary["critical_blockers"]:
@@ -580,6 +689,13 @@ def render_markdown(payload: dict) -> str:
         lines.append(f"- Repo: {payload['repo']['target']}")
     if payload["live"]:
         lines.append(f"- Website: {payload['live']['url']}")
+    lines.extend(["", "## One-Glance Card", "", "One-glance verdict: SAFE / PARTIAL / NOT SAFE + key reason", ""])
+    lines.append("| Dimension | Status | Signal | Evidence |")
+    lines.append("|---|---|---|---|")
+    for row in build_one_glance(payload["checks"]):
+        evidence = row["evidence"].replace("|", "\\|") if row["evidence"] else ""
+        signal = signal_to_emoji(row["signal"])
+        lines.append(f"| {row['dimension']} | {row['status']} | {signal} | {evidence} |")
     if summary["critical_blockers"]:
         lines.extend(["", "## Critical Blockers", ""])
         for blocker in summary["critical_blockers"]:
@@ -595,6 +711,26 @@ def render_markdown(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def write_evidence(dir_path: Path, live: LiveFacts | None, repo: RepoFacts | None, summary: dict) -> None:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "summary": summary,
+        "live_url": live.url if live else None,
+        "attestation_url": live.attestation_url if live else None,
+        "compose_hash": live.compose_hash if live else None,
+        "compose_hash_match": live.compose_hash_match if live else None,
+        "tls_fingerprint": live.cert_fingerprint if live else None,
+        "repo_target": repo.target if repo else None,
+        "repo_remote": repo.remote_url if repo else None,
+    }
+    (dir_path / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if live and live.attestation_body:
+        suffix = "json" if live.attestation_content_type and "json" in live.attestation_content_type else "txt"
+        (dir_path / f"attestation.{suffix}").write_text(live.attestation_body, encoding="utf-8")
+    if live and live.cert_pem:
+        (dir_path / "cert.pem").write_text(live.cert_pem, encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Assess a repo and website under the dstack DevProof model.")
     parser.add_argument("--repo", help="Local repo path or GitHub URL")
@@ -604,17 +740,30 @@ def main() -> int:
     parser.add_argument("--cluster-domain", help="Explicit cluster domain for 8090 lookup")
     parser.add_argument("--format", choices=["text", "markdown", "json"], default="text")
     parser.add_argument("--write-report", help="Optional output path")
+    parser.add_argument("--report-language", default="en", help="Report language (default: en)")
+    parser.add_argument("--evidence-dir", help="Optional directory to write evidence snapshots")
     args = parser.parse_args()
     cleanup_dir = None
     try:
+        if args.report_language and args.report_language.lower() != "en":
+            sys.stderr.write("warning: report-language is fixed to English; continuing with English output.\n")
         repo_root, cleanup_dir = prepare_repo(args.repo)
         repo = collect_repo(repo_root, args.repo) if repo_root else None
         live = collect_live(args.url, args.attestation_url, args.app_id, args.cluster_domain) if args.url else None
         checks = build_checks(repo, live)
-        payload = {"summary": summarize(checks, live), "repo": asdict(repo) if repo else None, "live": asdict(live) if live else None, "checks": [asdict(check) for check in checks]}
+        summary = summarize(checks, live)
+        payload = {
+            "summary": summary,
+            "repo": asdict(repo) if repo else None,
+            "live": asdict(live) if live else None,
+            "checks": [asdict(check) for check in checks],
+            "one_glance": build_one_glance(checks),
+        }
         rendered = json.dumps(payload, indent=2) if args.format == "json" else render_markdown(payload) if args.format == "markdown" else render_text(payload)
         if args.write_report:
             Path(args.write_report).write_text(rendered, encoding="utf-8")
+        if args.evidence_dir:
+            write_evidence(Path(args.evidence_dir), live, repo, summary)
         sys.stdout.write(rendered)
         return 0
     except Exception as exc:

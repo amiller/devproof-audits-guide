@@ -1,5 +1,21 @@
 # TEE Trust Report
 
+Note: Final report must be in English.
+
+## One-Glance Card
+
+One-glance verdict: SAFE / PARTIAL / NOT SAFE + key reason
+
+| Dimension | Status | Signal | Evidence |
+| --- | --- | --- | --- |
+| Operator gap (can operator exfiltrate?) | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | allowed_envs, ${VAR} URLs |
+| Attestation integrity | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | TDX quote + compose_hash match |
+| TLS binding | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | certFingerprint vs attestation |
+| Build reproducibility | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | digest pin + SOURCE_DATE_EPOCH |
+| Upgrade transparency | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | Base KMS / timelock / history |
+
+Signal key: GREEN=closed, YELLOW=partial/unknown, RED=attackable
+
 ## Summary
 
 | Item | Result | Notes |
