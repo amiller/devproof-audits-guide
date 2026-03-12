@@ -776,6 +776,13 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
                 if rebuild_notes:
                     for note in rebuild_notes[:4]:
                         repro_evidence.insert(0, f"rebuild failure: {note}")
+                if rebuild_status == "fail" and not rebuild_notes:
+                    mismatch = next((item for item in rebuild_evidence if item.startswith("rebuild digest mismatch")), None)
+                    buildx = next((item for item in rebuild_evidence if "buildx failed" in item or "dockerfile missing" in item), None)
+                    reason = buildx or mismatch
+                    if reason:
+                        repro_summary = f"Rebuild verification failed ({reason})."
+                        repro_evidence.insert(0, f"rebuild failure: {reason}")
             else:
                 note = ", ".join(rebuild_notes) if rebuild_notes else "rebuild did not run"
                 repro_status = "fail"
@@ -935,6 +942,8 @@ def status_to_matrix(status: str) -> tuple[str, str]:
         return "PASS", "GREEN"
     if status == "fail":
         return "FAIL", "RED"
+    if status == "skip":
+        return "SKIP", "YELLOW"
     return "PARTIAL", "YELLOW"
 
 

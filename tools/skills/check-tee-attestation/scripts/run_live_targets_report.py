@@ -47,6 +47,46 @@ def color_signal(signal: str) -> str:
     return SIGNAL_EMOJI.get(signal.upper(), signal)
 
 
+def status_to_matrix(status: str) -> tuple[str, str]:
+    if status == "pass":
+        return "PASS", "GREEN"
+    if status == "fail":
+        return "FAIL", "RED"
+    if status == "skip":
+        return "SKIP", "YELLOW"
+    return "PARTIAL", "YELLOW"
+
+
+def build_one_glance_from_checks(checks: list[dict]) -> list[dict[str, str]]:
+    def to_category(check) -> str:
+        return check.get("category", "")
+
+    def to_status(check) -> str:
+        return check.get("status", "skip")
+
+    def to_evidence(check) -> list[str]:
+        return check.get("evidence") or []
+
+    by_category = {to_category(c): c for c in checks}
+    dimensions = [
+        ("operator_gap", "Operator gap (can operator exfiltrate?)"),
+        ("attestation", "Attestation integrity"),
+        ("endpoint_health", "Application endpoint health"),
+        ("tls_binding", "TLS binding"),
+        ("reproducibility", "Build reproducibility"),
+        ("upgrade_transparency", "Upgrade transparency"),
+    ]
+    rows: list[dict[str, str]] = []
+    for key, label in dimensions:
+        check = by_category.get(key, {})
+        status = to_status(check)
+        status_label, signal = status_to_matrix(status)
+        evidence_list = to_evidence(check)
+        evidence = (evidence_list[0] if evidence_list else "").strip()
+        rows.append({"dimension": label, "status": status_label, "signal": signal, "evidence": evidence})
+    return rows
+
+
 def is_url(value: str) -> bool:
     return value.startswith(("http://", "https://", "git@"))
 
@@ -237,7 +277,7 @@ def main() -> int:
         lines.append(repo_line)
         lines.append(f"Website: {url}")
 
-        one_glance = data.get("one_glance") or []
+        one_glance = build_one_glance_from_checks(checks)
         if one_glance:
             lines.append("")
             lines.append("One-Glance Card:")
