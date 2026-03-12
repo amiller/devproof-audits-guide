@@ -71,7 +71,7 @@ def pick_repo(entry: dict) -> str | None:
     return None
 
 
-def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) -> tuple[str, str | None, str | None]:
+def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) -> tuple[str, str | None, str | None, bool]:
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     temp_dir = tempfile.mkdtemp(prefix="live-target-repo-", dir=str(TMP_ROOT))
     repo_name = repo_url.rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
@@ -85,6 +85,7 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git clone failed")
     note = None
+    checked_out = True
     if repo_commit:
         result = subprocess.run(["git", "-C", str(clone_dir), "checkout", repo_commit], capture_output=True, text=True, check=False)
         if result.returncode != 0:
@@ -93,7 +94,8 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
                 result = subprocess.run(["git", "-C", str(clone_dir), "checkout", repo_commit], capture_output=True, text=True, check=False)
         if result.returncode != 0:
             note = result.stderr.strip() or result.stdout.strip() or "git checkout failed"
-    return str(clone_dir), temp_dir, note
+            checked_out = False
+    return str(clone_dir), temp_dir, note, checked_out
 
 
 def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | None]:
@@ -101,6 +103,7 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
     repo_value = pick_repo(entry)
     url = entry.get("url")
     attestation_url = entry.get("attestation_url")
+    repo_subdir = entry.get("repo_subdir")
     repo_branch = entry.get("repo_branch") if isinstance(entry.get("repo_branch"), str) else None
     repo_commit = entry.get("repo_commit") if isinstance(entry.get("repo_commit"), str) else None
     cleanup_dir = None
@@ -113,7 +116,13 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
     if isinstance(repo_value, str):
         if is_url(repo_value):
             try:
-                repo_arg, cleanup_dir, repo_note = clone_repo(repo_value, repo_branch, repo_commit)
+                repo_arg, cleanup_dir, repo_note, checked_out = clone_repo(repo_value, repo_branch, repo_commit)
+                if repo_commit and not checked_out:
+                    if repo_note:
+                        repo_note = f"{repo_note}; commit checkout failed; skipping target"
+                    else:
+                        repo_note = "commit checkout failed; skipping target"
+                    return False, name, {"error": f"commit checkout failed: {repo_note}"}, cleanup_dir, repo_note
             except RuntimeError as exc:
                 return False, name, {"error": str(exc)}, cleanup_dir, repo_note
         else:
@@ -126,13 +135,21 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
                     else:
                         repo_note = "repo_path not found; using repo_url"
                     try:
-                        repo_arg, cleanup_dir, repo_note_clone = clone_repo(repo_url, repo_branch, repo_commit)
+                        repo_arg, cleanup_dir, repo_note_clone, checked_out = clone_repo(repo_url, repo_branch, repo_commit)
                         if repo_note_clone:
                             repo_note = f"{repo_note}; {repo_note_clone}"
+                        if repo_commit and not checked_out:
+                            if repo_note:
+                                repo_note = f"{repo_note}; commit checkout failed; skipping target"
+                            else:
+                                repo_note = "commit checkout failed; skipping target"
+                            return False, name, {"error": f"commit checkout failed: {repo_note}"}, cleanup_dir, repo_note
                     except RuntimeError as exc:
                         return False, name, {"error": str(exc)}, cleanup_dir, repo_note
                 else:
                     return False, name, {"error": f"repo path not found: {repo_arg}"}, cleanup_dir, repo_note
+        if isinstance(repo_subdir, str) and repo_subdir:
+            repo_arg = str((Path(repo_arg) / repo_subdir).resolve())
         cmd.extend(["--repo", repo_arg])
     if isinstance(url, str) and url:
         cmd.extend(["--url", url])

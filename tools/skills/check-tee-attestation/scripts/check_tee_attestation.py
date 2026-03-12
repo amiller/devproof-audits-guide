@@ -840,6 +840,8 @@ def summarize(checks: list[Check], live: LiveFacts | None) -> dict:
     verdict = "SAFE under the DevProof model, subject to normal audit caution." if stage == "Stage 1 candidate" and score >= 80 and not blockers else "PARTIAL: the app may use real TEE security, but users still rely on the operator." if stage == "Stage 0" else "NOT SAFE TO ASSUME: the evidence does not yet support a strong TEE trust claim."
     if live and live.url and not live.reachable:
         verdict = "INCONCLUSIVE: the live website could not be reached, so trust claims remain unverified."
+        stage = "Unproven"
+        score = min(score, 25)
     return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers}
 
 
