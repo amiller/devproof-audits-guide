@@ -150,6 +150,8 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
                     return False, name, {"error": f"repo path not found: {repo_arg}"}, cleanup_dir, repo_note
         if isinstance(repo_subdir, str) and repo_subdir:
             repo_arg = str((Path(repo_arg) / repo_subdir).resolve())
+            if not Path(repo_arg).exists():
+                return False, name, {"error": f"repo_subdir not found: {repo_arg}"}, cleanup_dir, repo_note
         cmd.extend(["--repo", repo_arg])
     if isinstance(url, str) and url:
         cmd.extend(["--url", url])

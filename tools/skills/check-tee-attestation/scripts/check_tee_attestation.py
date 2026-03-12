@@ -491,7 +491,7 @@ def verify_rebuild(repo_root: Path, repo: RepoFacts, live: LiveFacts | None) -> 
     expected = list(dict.fromkeys(expected))
     if not expected:
         notes.append("no deployed image digest found in live app_compose; reproducibility not verifiable")
-        return "fail", notes, evidence
+        return None, notes, evidence
     evidence.append(f"deployed digests: {', '.join(expected)}")
 
     targets = detect_build_targets(repo_root, repo)
