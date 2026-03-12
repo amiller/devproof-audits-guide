@@ -354,22 +354,85 @@ def parse_image_digests(lines: list[str]) -> list[str]:
     return digests
 
 
-def detect_build_targets(repo_root: Path, repo: RepoFacts) -> list[tuple[Path, Path]]:
-    targets: list[tuple[Path, Path]] = []
+BuildTarget = tuple[Path, Path, str]
+
+
+def detect_build_targets(repo_root: Path, repo: RepoFacts) -> list[BuildTarget]:
+    targets: list[BuildTarget] = []
     dockerfiles = [repo_root / Path(p) for p in repo.dockerfiles]
     for dockerfile in dockerfiles:
         if dockerfile.exists():
-            targets.append((dockerfile.parent, dockerfile))
+            label = f"dockerfile:{relpath(dockerfile, repo_root)}"
+            targets.append((dockerfile.parent, dockerfile, label))
     if not targets:
         root_df = repo_root / "Dockerfile"
         if root_df.exists():
-            targets.append((repo_root, root_df))
+            targets.append((repo_root, root_df, "dockerfile:./Dockerfile"))
     return targets
+
+
+def detect_compose_build_targets(repo_root: Path, repo: RepoFacts) -> tuple[list[BuildTarget], list[str]]:
+    targets: list[BuildTarget] = []
+    notes: list[str] = []
+    if not compose_available():
+        notes.append("docker compose not available; compose build targets skipped")
+        return targets, notes
+
+    for rel in repo.compose_files:
+        compose_file = repo_root / Path(rel)
+        if not compose_file.exists():
+            continue
+        cmd = ["docker", "compose", "-f", str(compose_file), "config", "--format", "json"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            notes.append(f"compose config failed for {rel}: {result.stderr.strip() or result.stdout.strip() or 'unknown error'}")
+            continue
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            notes.append(f"compose config JSON parse failed for {rel}: {exc}")
+            continue
+        services = data.get("services", {})
+        if not isinstance(services, dict):
+            continue
+        for name, svc in services.items():
+            if not isinstance(svc, dict):
+                continue
+            build = svc.get("build")
+            if isinstance(build, str):
+                context = build
+                dockerfile = "Dockerfile"
+            elif isinstance(build, dict):
+                context = build.get("context") or "."
+                dockerfile = build.get("dockerfile") or "Dockerfile"
+            else:
+                continue
+            context_path = (compose_file.parent / context).resolve()
+            dockerfile_path = (context_path / dockerfile).resolve()
+            label = f"{compose_file.name}:{name}"
+            targets.append((context_path, dockerfile_path, label))
+    return targets, notes
 
 
 def docker_available() -> bool:
     try:
         result = subprocess.run(["docker", "--version"], capture_output=True, text=True, check=False)
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def buildx_available() -> bool:
+    try:
+        result = subprocess.run(["docker", "buildx", "version"], capture_output=True, text=True, check=False)
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def compose_available() -> bool:
+    try:
+        result = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True, check=False)
         return result.returncode == 0
     except FileNotFoundError:
         return False
@@ -418,6 +481,9 @@ def verify_rebuild(repo_root: Path, repo: RepoFacts, live: LiveFacts | None) -> 
     if not docker_available():
         notes.append("docker not available; rebuild verification skipped")
         return None, notes, evidence
+    if not buildx_available():
+        notes.append("docker buildx not available; rebuild verification skipped")
+        return None, notes, evidence
 
     expected = []
     if live:
@@ -430,22 +496,32 @@ def verify_rebuild(repo_root: Path, repo: RepoFacts, live: LiveFacts | None) -> 
 
     targets = detect_build_targets(repo_root, repo)
     if not targets:
-        notes.append("no Dockerfile targets found for rebuild")
-        return "fail", notes, evidence
+        compose_targets, compose_notes = detect_compose_build_targets(repo_root, repo)
+        notes.extend(compose_notes)
+        if compose_targets:
+            targets = compose_targets
+            notes.append("using docker compose build targets for rebuild")
+        else:
+            notes.append("no Dockerfile or compose build targets found; rebuild verification skipped")
+            return None, notes, evidence
 
     mismatches = 0
     build_failures = 0
-    for idx, (context, dockerfile) in enumerate(targets, start=1):
+    for idx, (context, dockerfile, label) in enumerate(targets, start=1):
         tag = f"repro-check-{os.getpid()}-{idx}"
+        if not dockerfile.exists():
+            notes.append(f"dockerfile missing for {label}: {dockerfile}")
+            build_failures += 1
+            continue
         digest, err = build_with_buildx(context, dockerfile, tag)
         if err:
-            notes.append(f"buildx failed for {dockerfile}: {err}")
+            notes.append(f"buildx failed for {label} ({dockerfile}): {err}")
             build_failures += 1
             continue
         if digest in expected:
-            evidence.append(f"rebuild digest match: {digest} ({dockerfile})")
+            evidence.append(f"rebuild digest match: {digest} ({label})")
             return "pass", notes, evidence
-        evidence.append(f"rebuild digest mismatch: {digest} ({dockerfile})")
+        evidence.append(f"rebuild digest mismatch: {digest} ({label})")
         mismatches += 1
 
     if mismatches or build_failures:

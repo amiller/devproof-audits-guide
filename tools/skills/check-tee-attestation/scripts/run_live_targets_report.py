@@ -57,17 +57,17 @@ def resolve_repo(value: str) -> str:
 
 
 def pick_repo(entry: dict) -> str | None:
-    repo_path = entry.get("repo_path") or entry.get("repo")
     repo_url = entry.get("repo_url")
     repo_urls = entry.get("repo_urls")
-    if isinstance(repo_path, str) and repo_path:
-        return repo_path
     if isinstance(repo_url, str) and repo_url:
         return repo_url
     if isinstance(repo_urls, list) and repo_urls:
         first = repo_urls[0]
         if isinstance(first, str) and first:
             return first
+    repo_path = entry.get("repo_path") or entry.get("repo")
+    if isinstance(repo_path, str) and repo_path:
+        return repo_path
     return None
 
 
