@@ -743,8 +743,12 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
             if rebuild_status:
                 repro_status = rebuild_status
                 repro_summary = "Rebuild verification matched deployed digest." if rebuild_status == "pass" else "Rebuild verification did not match deployed digest."
-            elif rebuild_notes:
-                repro_summary = f"{repro_summary} (rebuild verify skipped: {', '.join(rebuild_notes)})"
+            else:
+                note = ", ".join(rebuild_notes) if rebuild_notes else "rebuild did not run"
+                repro_status = "fail"
+                repro_summary = f"Rebuild verification required but skipped: {note}."
+                if rebuild_notes:
+                    repro_evidence.insert(0, f"rebuild skipped: {note}")
         add_check(checks, "reproducibility", "Reproducibility", repro_status, repro_summary, repro_evidence, "Pin bases and images by digest, then document hash reproduction.")
         operator_status_repo = "fail" if repo.variable_images or repo.configurable_url_hits or repo.key_material_hits else "warn" if repo.allowed_env_hits or repo.infra_secret_hits else "pass"
         operator_evidence = repo.variable_images + repo.configurable_url_hits + repo.key_material_hits + repo.allowed_env_hits + repo.infra_secret_hits
