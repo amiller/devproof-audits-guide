@@ -17,6 +17,7 @@ TMP_ROOT = REPO_ROOT / ".tmp_live_targets"
 
 CATEGORY_ORDER = [
     "attestation",
+    "endpoint_health",
     "tls_binding",
     "auditability",
     "reproducibility",
@@ -26,6 +27,7 @@ CATEGORY_ORDER = [
 ]
 CATEGORY_LABELS = {
     "attestation": "Attestation",
+    "endpoint_health": "Application Endpoint Health",
     "tls_binding": "TLS Binding",
     "auditability": "Repo Auditability",
     "reproducibility": "Reproducibility",

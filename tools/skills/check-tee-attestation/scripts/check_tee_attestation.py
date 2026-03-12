@@ -69,6 +69,9 @@ class RepoFacts:
 class LiveFacts:
     url: str | None = None
     reachable: bool = False
+    main_url_ok: bool | None = None
+    main_url_status: int | None = None
+    main_url_error: str | None = None
     https: bool = False
     tls_ok: bool = False
     tls_error: str | None = None
@@ -106,10 +109,11 @@ def normalize_fingerprint(value: str | None) -> str | None:
     return re.sub(r"[^0-9a-f]", "", value.lower()) if value else None
 
 
-def fetch_url(url: str) -> tuple[str, dict[str, str]]:
+def fetch_url(url: str) -> tuple[str, dict[str, str], int]:
     req = urllib.request.Request(url, headers={"User-Agent": "check-tee-attestation/1.0"})
     with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.read().decode("utf-8", errors="replace"), {k.lower(): v for k, v in resp.headers.items()}
+        status = getattr(resp, "status", None) or resp.getcode()
+        return resp.read().decode("utf-8", errors="replace"), {k.lower(): v for k, v in resp.headers.items()}, int(status)
 
 
 def _try_parse_json(value: str) -> dict | None:
@@ -599,9 +603,20 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
     parsed = urllib.parse.urlparse(url)
     facts.https = parsed.scheme == "https"
     try:
-        _, _ = fetch_url(url)
+        _, _, status = fetch_url(url)
         facts.reachable = True
+        facts.main_url_ok = True
+        facts.main_url_status = status
+    except urllib.error.HTTPError as exc:
+        # HTTP errors still prove the host is reachable.
+        facts.reachable = True
+        facts.main_url_ok = False
+        facts.main_url_status = exc.code
+        facts.main_url_error = str(exc)
+        facts.notes.append(f"main URL HTTP error: {exc.code}")
     except Exception as exc:
+        facts.main_url_ok = False
+        facts.main_url_error = str(exc)
         facts.notes.append(f"main URL fetch failed: {exc}")
     if facts.https:
         try:
@@ -656,8 +671,9 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
             continue
         seen.add(candidate)
         try:
-            body, headers = fetch_url(candidate)
-        except urllib.error.HTTPError:
+            body, headers, _ = fetch_url(candidate)
+        except urllib.error.HTTPError as exc:
+            facts.notes.append(f"{candidate} HTTP error: {exc.code}")
             continue
         except Exception as exc:
             facts.notes.append(f"{candidate} failed: {exc}")
@@ -752,6 +768,9 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
         add_check(checks, "reproducibility", "Reproducibility", repro_status, repro_summary, repro_evidence, "Pin bases and images by digest, then document hash reproduction.")
         operator_status_repo = "fail" if repo.variable_images or repo.configurable_url_hits or repo.key_material_hits else "warn" if repo.allowed_env_hits or repo.infra_secret_hits else "pass"
         operator_evidence = repo.variable_images + repo.configurable_url_hits + repo.key_material_hits + repo.allowed_env_hits + repo.infra_secret_hits
+        if repo.source_file_count == 0 and not repo.compose_files and not repo.dockerfiles:
+            operator_status_repo = "skip"
+            operator_evidence.insert(0, "source files: 0 (insufficient source to assess operator gap)")
         operator_status_live = "skip"
         if live:
             live_fail = bool(live.docker_compose_images_variable or live.allowed_envs_url or live.allowed_envs_image or live.allowed_envs_secret)
@@ -773,7 +792,16 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
             if live.pre_launch_script_present:
                 operator_evidence.append("pre_launch_script present in live app_compose")
         operator_status = merge_status(operator_status_repo, operator_status_live)
-        add_check(checks, "operator_gap", "Operator gap", operator_status, "The operator still appears able to steer code, routing, or key material." if operator_status == "fail" else "There are signs that mutable runtime configuration still matters." if operator_status == "warn" else "No obvious operator-controlled URL, image, or key gap was found.", operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
+        operator_summary = (
+            "The operator still appears able to steer code, routing, or key material."
+            if operator_status == "fail"
+            else "There are signs that mutable runtime configuration still matters."
+            if operator_status == "warn"
+            else "Insufficient source to assess operator-controlled gaps."
+            if operator_status == "skip"
+            else "No obvious operator-controlled URL, image, or key gap was found."
+        )
+        add_check(checks, "operator_gap", "Operator gap", operator_status, operator_summary, operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
         if live:
             if not live.reachable:
                 attestation_status = "skip"
@@ -814,6 +842,22 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
         for category, title in [("auditability", "Repo auditability"), ("reproducibility", "Reproducibility"), ("operator_gap", "Operator gap"), ("attestation", "Attestation"), ("upgrade_transparency", "Upgrade transparency"), ("code_hygiene", "Code hygiene")]:
             add_check(checks, category, title, "skip", "No repo was provided.", [], "Provide a repo path or GitHub URL.")
     if live and live.url:
+        if not live.reachable:
+            endpoint_status = "fail"
+            endpoint_summary = "Main URL unreachable; application endpoint health unknown."
+        elif live.main_url_ok:
+            endpoint_status = "pass"
+            endpoint_summary = "Main URL reachable and returned a successful response."
+        else:
+            endpoint_status = "warn"
+            code = live.main_url_status
+            endpoint_summary = f"Main URL reachable but returned HTTP {code}." if code else "Main URL reachable but returned an error response."
+        endpoint_evidence: list[str] = []
+        if live.main_url_status:
+            endpoint_evidence.append(f"main URL status: HTTP {live.main_url_status}")
+        if live.main_url_error:
+            endpoint_evidence.append(f"main URL error: {live.main_url_error}")
+        add_check(checks, "endpoint_health", "Application endpoint health", endpoint_status, endpoint_summary, endpoint_evidence, "Expose a healthy application endpoint or document expected non-200 responses.")
         evidence = [item for item in [f"subject: {live.cert_subject}" if live.cert_subject else None, f"issuer: {live.cert_issuer}" if live.cert_issuer else None, f"notAfter: {live.cert_not_after}" if live.cert_not_after else None, f"fingerprint: {live.cert_fingerprint}" if live.cert_fingerprint else None, f"attestation endpoint: {live.attestation_url}" if live.attestation_url else None] if item]
         if live.attested_cert_fingerprints:
             evidence.append(f"attested cert fingerprints: {', '.join(live.attested_cert_fingerprints[:2])}")
@@ -833,6 +877,7 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
                 summary = "HTTPS is absent or broken, or no attestation-backed TLS proof was found."
         add_check(checks, "tls_binding", "Website TLS binding", tls_status, summary, evidence + ([f"tls error: {live.tls_error}"] if live.tls_error else []), "Expose cert or key binding in attestation, or document the attested gateway boundary.")
     else:
+        add_check(checks, "endpoint_health", "Application endpoint health", "skip", "No website URL was provided.", [], "Provide a live URL.")
         add_check(checks, "tls_binding", "Website TLS binding", "skip", "No website URL was provided.", [], "Provide a live URL.")
     return checks
 
@@ -970,6 +1015,9 @@ def write_evidence(dir_path: Path, live: LiveFacts | None, repo: RepoFacts | Non
     metadata = {
         "summary": summary,
         "live_url": live.url if live else None,
+        "main_url_ok": live.main_url_ok if live else None,
+        "main_url_status": live.main_url_status if live else None,
+        "main_url_error": live.main_url_error if live else None,
         "attestation_url": live.attestation_url if live else None,
         "compose_hash": live.compose_hash if live else None,
         "compose_hash_match": live.compose_hash_match if live else None,
