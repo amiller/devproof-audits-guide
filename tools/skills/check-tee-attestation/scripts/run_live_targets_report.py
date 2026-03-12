@@ -72,6 +72,26 @@ def pick_repo(entry: dict) -> str | None:
 
 
 def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) -> tuple[str, str | None, str | None, bool]:
+    def resolve_remote_commit(short_commit: str) -> tuple[str, str | None]:
+        if not short_commit or len(short_commit) >= 40:
+            return short_commit, None
+        result = subprocess.run(["git", "ls-remote", repo_url], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            return short_commit, "ls-remote failed while resolving commit prefix"
+        matches = []
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            sha = parts[0].strip()
+            if sha.startswith(short_commit):
+                matches.append(sha)
+        if len(matches) == 1:
+            return matches[0], f"resolved commit prefix {short_commit} -> {matches[0]}"
+        if len(matches) > 1:
+            return short_commit, "commit prefix is ambiguous on remote"
+        return short_commit, "commit prefix not found on remote"
+
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     temp_dir = tempfile.mkdtemp(prefix="live-target-repo-", dir=str(TMP_ROOT))
     repo_name = repo_url.rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
@@ -87,11 +107,18 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
     note = None
     checked_out = True
     if repo_commit:
-        result = subprocess.run(["git", "-C", str(clone_dir), "checkout", repo_commit], capture_output=True, text=True, check=False)
+        resolved_commit, resolve_note = resolve_remote_commit(repo_commit)
+        if resolve_note:
+            note = resolve_note if not note else f"{note}; {resolve_note}"
+        result = subprocess.run(["git", "-C", str(clone_dir), "checkout", resolved_commit], capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            fetch = subprocess.run(["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", repo_commit], capture_output=True, text=True, check=False)
+            fetch = subprocess.run(["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", resolved_commit], capture_output=True, text=True, check=False)
             if fetch.returncode == 0:
-                result = subprocess.run(["git", "-C", str(clone_dir), "checkout", repo_commit], capture_output=True, text=True, check=False)
+                result = subprocess.run(["git", "-C", str(clone_dir), "checkout", resolved_commit], capture_output=True, text=True, check=False)
+            if result.returncode != 0 and repo_branch:
+                deepen = subprocess.run(["git", "-C", str(clone_dir), "fetch", "--depth", "200", "origin", repo_branch], capture_output=True, text=True, check=False)
+                if deepen.returncode == 0:
+                    result = subprocess.run(["git", "-C", str(clone_dir), "checkout", resolved_commit], capture_output=True, text=True, check=False)
         if result.returncode != 0:
             note = result.stderr.strip() or result.stdout.strip() or "git checkout failed"
             checked_out = False

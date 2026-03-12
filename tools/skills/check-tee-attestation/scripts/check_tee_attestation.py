@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -770,17 +770,24 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
                 operator_evidence.append("pre_launch_script present in live app_compose")
         operator_status = merge_status(operator_status_repo, operator_status_live)
         add_check(checks, "operator_gap", "Operator gap", operator_status, "The operator still appears able to steer code, routing, or key material." if operator_status == "fail" else "There are signs that mutable runtime configuration still matters." if operator_status == "warn" else "No obvious operator-controlled URL, image, or key gap was found.", operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
-        if live and live.attestation_found:
-            attestation_status = "pass" if live.compose_hash_match else "warn"
+        if live:
+            if not live.reachable:
+                attestation_status = "skip"
+            elif live.attestation_found:
+                attestation_status = "pass" if live.compose_hash_match else "warn"
+            else:
+                attestation_status = "fail"
         elif repo.attestation_hits and repo.binding_hits:
             attestation_status = "warn"
         else:
-            attestation_status = "fail"
+            attestation_status = "skip"
         attestation_summary = (
             "Live attestation evidence is reachable and coherent."
             if attestation_status == "pass"
             else "The repo contains attestation logic, but live verification is partial."
             if attestation_status == "warn"
+            else "Live target unavailable or no live URL provided; attestation not verifiable."
+            if attestation_status == "skip"
             else "No convincing attestation path was found."
         )
         attestation_evidence = repo.attestation_hits + repo.binding_hits
@@ -807,15 +814,19 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
         if live.attested_cert_fingerprints:
             evidence.append(f"attested cert fingerprints: {', '.join(live.attested_cert_fingerprints[:2])}")
         evidence.extend(live.notes[:4])
-        tls_status = "fail" if not live.https or not live.tls_ok and not live.attestation_found else "pass" if live.tls_binding_match else "warn" if live.tls_ok else "fail"
-        if tls_status == "pass":
-            summary = "The live certificate appears to be bound to attestation evidence."
-        elif tls_status == "warn" and live.attestation_found:
-            summary = "The website has HTTPS and some attestation surface, but the binding is not explicit."
-        elif tls_status == "warn":
-            summary = "The website has HTTPS, but no attestation-backed TLS proof was found."
+        if not live.reachable:
+            tls_status = "skip"
+            summary = "Live URL unreachable; TLS not verifiable."
         else:
-            summary = "HTTPS is absent or broken, or no attestation-backed TLS proof was found."
+            tls_status = "fail" if not live.https or not live.tls_ok and not live.attestation_found else "pass" if live.tls_binding_match else "warn" if live.tls_ok else "fail"
+            if tls_status == "pass":
+                summary = "The live certificate appears to be bound to attestation evidence."
+            elif tls_status == "warn" and live.attestation_found:
+                summary = "The website has HTTPS and some attestation surface, but the binding is not explicit."
+            elif tls_status == "warn":
+                summary = "The website has HTTPS, but no attestation-backed TLS proof was found."
+            else:
+                summary = "HTTPS is absent or broken, or no attestation-backed TLS proof was found."
         add_check(checks, "tls_binding", "Website TLS binding", tls_status, summary, evidence + ([f"tls error: {live.tls_error}"] if live.tls_error else []), "Expose cert or key binding in attestation, or document the attested gateway boundary.")
     else:
         add_check(checks, "tls_binding", "Website TLS binding", "skip", "No website URL was provided.", [], "Provide a live URL.")
@@ -835,15 +846,20 @@ def summarize(checks: list[Check], live: LiveFacts | None) -> dict:
     needed = ["attestation", "auditability", "reproducibility", "operator_gap", "upgrade_transparency"]
     statuses = [by_category.get(name, "skip") for name in needed]
     has_live_target = bool(live and live.url)
-    stage = "Unproven" if (not has_live_target) or statuses[0] in {"skip", "fail"} else "Stage 1 candidate" if all(s == "pass" for s in statuses) else "Stage 0"
+    attestation_status = by_category.get("attestation", "skip")
+    if live and live.url and not live.reachable:
+        stage = "Unproven"
+        blockers = [c.summary for c in checks if c.status == "fail"][:6]
+        verdict = "INCONCLUSIVE: the live website could not be reached, so trust claims remain unverified."
+        score = min(score, 25)
+        return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers}
+    if not has_live_target or attestation_status != "pass":
+        stage = "Unproven"
+    else:
+        stage = "Stage 1 candidate" if all(s == "pass" for s in statuses) else "Stage 0"
     blockers = [c.summary for c in checks if c.status == "fail"][:6]
     verdict = "SAFE under the DevProof model, subject to normal audit caution." if stage == "Stage 1 candidate" and score >= 80 and not blockers else "PARTIAL: the app may use real TEE security, but users still rely on the operator." if stage == "Stage 0" else "NOT SAFE TO ASSUME: the evidence does not yet support a strong TEE trust claim."
-    if live and live.url and not live.reachable:
-        verdict = "INCONCLUSIVE: the live website could not be reached, so trust claims remain unverified."
-        stage = "Unproven"
-        score = min(score, 25)
     return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers}
-
 
 def status_to_matrix(status: str) -> tuple[str, str]:
     if status == "pass":
@@ -855,11 +871,11 @@ def status_to_matrix(status: str) -> tuple[str, str]:
 
 def signal_to_emoji(signal: str) -> str:
     if signal == "GREEN":
-        return "🟢"
+        return "馃煝"
     if signal == "YELLOW":
-        return "🟡"
+        return "馃煛"
     if signal == "RED":
-        return "🔴"
+        return "馃敶"
     return signal
 
 
@@ -1012,3 +1028,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
