@@ -26,6 +26,7 @@
     {
       "name": "hermes",
       "repo": "case-studies/hermes",
+      "repo_url": "https://github.com/jameslbarnes/hermes",
       "notes": "Source repo not identified in case study; only image tags and Trust Center references are present.",
       "url": "https://hermes.teleport.computer",
       "attestation_url": "https://db82f581256a3c9244c4d7129a67336990d08cdf-8090.dstack-pha-prod9.phala.network/",
