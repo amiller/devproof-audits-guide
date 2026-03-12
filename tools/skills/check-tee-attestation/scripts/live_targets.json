@@ -37,7 +37,6 @@
     {
       "name": "tokscope-xordi",
       "repo": "case-studies/tokscope-xordi",
-      "repo_path": "D:/项目/工作/tk/repos/dstack-tutorial/tmp/teleport-tokscope",
       "repo_url": "https://github.com/Account-Link/teleport-tokscope",
       "repo_branch": "tokscope-xordi",
       "repo_commit": "535fba0",

@@ -118,6 +118,21 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
                 return False, name, {"error": str(exc)}, cleanup_dir, repo_note
         else:
             repo_arg = resolve_repo(repo_value)
+            if not Path(repo_arg).exists():
+                repo_url = entry.get("repo_url")
+                if isinstance(repo_url, str) and repo_url:
+                    if repo_note:
+                        repo_note = f"{repo_note}; repo_path not found; using repo_url"
+                    else:
+                        repo_note = "repo_path not found; using repo_url"
+                    try:
+                        repo_arg, cleanup_dir, repo_note_clone = clone_repo(repo_url, repo_branch, repo_commit)
+                        if repo_note_clone:
+                            repo_note = f"{repo_note}; {repo_note_clone}"
+                    except RuntimeError as exc:
+                        return False, name, {"error": str(exc)}, cleanup_dir, repo_note
+                else:
+                    return False, name, {"error": f"repo path not found: {repo_arg}"}, cleanup_dir, repo_note
         cmd.extend(["--repo", repo_arg])
     if isinstance(url, str) and url:
         cmd.extend(["--url", url])
