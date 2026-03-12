@@ -529,6 +529,10 @@ def verify_rebuild(repo_root: Path, repo: RepoFacts, live: LiveFacts | None) -> 
         mismatches += 1
 
     if mismatches or build_failures:
+        if mismatches:
+            notes.append(f"rebuild digest mismatches: {mismatches}")
+        if build_failures:
+            notes.append(f"rebuild build failures: {build_failures}")
         return "fail", notes, evidence
     return "fail", notes, evidence
 
@@ -758,7 +762,20 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
                 repro_evidence = rebuild_evidence + repro_evidence
             if rebuild_status:
                 repro_status = rebuild_status
-                repro_summary = "Rebuild verification matched deployed digest." if rebuild_status == "pass" else "Rebuild verification did not match deployed digest."
+                if rebuild_status == "pass":
+                    repro_summary = "Rebuild verification matched deployed digest."
+                else:
+                    note_blob = " ".join(rebuild_notes).lower()
+                    if "rebuild build failures" in note_blob or "buildx failed" in note_blob or "dockerfile missing" in note_blob:
+                        reason = next((n for n in rebuild_notes if "buildx failed" in n or "dockerfile missing" in n), None)
+                        repro_summary = f"Rebuild verification failed to complete ({reason})." if reason else "Rebuild verification failed to complete."
+                    elif "rebuild digest mismatches" in note_blob:
+                        repro_summary = "Rebuild verification did not match deployed digest."
+                    else:
+                        repro_summary = "Rebuild verification failed."
+                if rebuild_notes:
+                    for note in rebuild_notes[:4]:
+                        repro_evidence.insert(0, f"rebuild failure: {note}")
             else:
                 note = ", ".join(rebuild_notes) if rebuild_notes else "rebuild did not run"
                 repro_status = "fail"
@@ -791,7 +808,10 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
                 operator_evidence.append(f"allowed_envs (SECRET): {', '.join(live.allowed_envs_secret[:6])}")
             if live.pre_launch_script_present:
                 operator_evidence.append("pre_launch_script present in live app_compose")
-        operator_status = merge_status(operator_status_repo, operator_status_live)
+        if operator_status_repo == "skip" and operator_status_live in ("pass", "skip"):
+            operator_status = "skip"
+        else:
+            operator_status = merge_status(operator_status_repo, operator_status_live)
         operator_summary = (
             "The operator still appears able to steer code, routing, or key material."
             if operator_status == "fail"
@@ -942,6 +962,7 @@ def build_one_glance(checks: list) -> list[dict[str, str]]:
     dimensions = [
         ("operator_gap", "Operator gap (can operator exfiltrate?)"),
         ("attestation", "Attestation integrity"),
+        ("endpoint_health", "Application endpoint health"),
         ("tls_binding", "TLS binding"),
         ("reproducibility", "Build reproducibility"),
         ("upgrade_transparency", "Upgrade transparency"),
