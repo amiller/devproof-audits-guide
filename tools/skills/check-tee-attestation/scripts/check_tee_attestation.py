@@ -62,6 +62,7 @@ class RepoFacts:
     timelock_hits: list[str] = field(default_factory=list)
     ci_repro_hits: list[str] = field(default_factory=list)
     hygiene_hits: list[str] = field(default_factory=list)
+    rebuild_notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -344,6 +345,114 @@ def collect_repo(repo_root: Path, target: str) -> RepoFacts:
     return facts
 
 
+def parse_image_digests(lines: list[str]) -> list[str]:
+    digests: list[str] = []
+    for line in lines:
+        match = re.search(r"@sha256:([0-9a-f]{32,})", line, re.IGNORECASE)
+        if match:
+            digests.append(match.group(1))
+    return digests
+
+
+def detect_build_targets(repo_root: Path, repo: RepoFacts) -> list[tuple[Path, Path]]:
+    targets: list[tuple[Path, Path]] = []
+    dockerfiles = [repo_root / Path(p) for p in repo.dockerfiles]
+    for dockerfile in dockerfiles:
+        if dockerfile.exists():
+            targets.append((dockerfile.parent, dockerfile))
+    if not targets:
+        root_df = repo_root / "Dockerfile"
+        if root_df.exists():
+            targets.append((repo_root, root_df))
+    return targets
+
+
+def docker_available() -> bool:
+    try:
+        result = subprocess.run(["docker", "--version"], capture_output=True, text=True, check=False)
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def build_with_buildx(context: Path, dockerfile: Path, tag: str) -> tuple[str | None, str | None]:
+    metadata = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+    metadata.close()
+    cmd = [
+        "docker",
+        "buildx",
+        "build",
+        "--progress",
+        "plain",
+        "--output",
+        "type=image",
+        "--metadata-file",
+        metadata.name,
+        "-f",
+        str(dockerfile),
+        str(context),
+        "--build-arg",
+        "SOURCE_DATE_EPOCH=0",
+        "-t",
+        tag,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        os.unlink(metadata.name)
+        return None, result.stderr.strip() or result.stdout.strip() or "buildx failed"
+    try:
+        data = json.loads(Path(metadata.name).read_text(encoding="utf-8"))
+    except Exception as exc:
+        os.unlink(metadata.name)
+        return None, f"failed to read buildx metadata: {exc}"
+    os.unlink(metadata.name)
+    digest = data.get("containerimage.digest")
+    if isinstance(digest, str) and digest.startswith("sha256:"):
+        return digest.replace("sha256:", ""), None
+    return None, "buildx metadata missing containerimage.digest"
+
+
+def verify_rebuild(repo_root: Path, repo: RepoFacts, live: LiveFacts | None) -> tuple[str | None, list[str], list[str]]:
+    notes: list[str] = []
+    evidence: list[str] = []
+    if not docker_available():
+        notes.append("docker not available; rebuild verification skipped")
+        return None, notes, evidence
+
+    expected = []
+    if live:
+        expected.extend(parse_image_digests(live.docker_compose_images_pinned))
+    expected = list(dict.fromkeys(expected))
+    if not expected:
+        notes.append("no deployed image digest found in live app_compose; reproducibility not verifiable")
+        return "fail", notes, evidence
+    evidence.append(f"deployed digests: {', '.join(expected)}")
+
+    targets = detect_build_targets(repo_root, repo)
+    if not targets:
+        notes.append("no Dockerfile targets found for rebuild")
+        return "fail", notes, evidence
+
+    mismatches = 0
+    build_failures = 0
+    for idx, (context, dockerfile) in enumerate(targets, start=1):
+        tag = f"repro-check-{os.getpid()}-{idx}"
+        digest, err = build_with_buildx(context, dockerfile, tag)
+        if err:
+            notes.append(f"buildx failed for {dockerfile}: {err}")
+            build_failures += 1
+            continue
+        if digest in expected:
+            evidence.append(f"rebuild digest match: {digest} ({dockerfile})")
+            return "pass", notes, evidence
+        evidence.append(f"rebuild digest mismatch: {digest} ({dockerfile})")
+        mismatches += 1
+
+    if mismatches or build_failures:
+        return "fail", notes, evidence
+    return "fail", notes, evidence
+
+
 def get_tls(url: str) -> dict[str, str | bool | None]:
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname
@@ -539,7 +648,7 @@ def merge_status(*values: str) -> str:
     return best
 
 
-def build_checks(repo: RepoFacts | None, live: LiveFacts | None) -> list[Check]:
+def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify: bool = True) -> list[Check]:
     checks: list[Check] = []
     if repo:
         audit_evidence = [f"source files: {repo.source_file_count}", f"compose files: {', '.join(repo.compose_files[:4]) or 'none'}", f"dockerfiles: {', '.join(repo.dockerfiles[:4]) or 'none'}"]
@@ -547,8 +656,20 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None) -> list[Check]:
             audit_evidence.insert(0, f"remote: {repo.remote_url}")
         audit_status = "pass" if repo.source_file_count >= 20 and (repo.remote_url or repo.compose_files or repo.dockerfiles) else "warn" if repo.source_file_count >= 5 or repo.compose_files or repo.dockerfiles else "fail"
         add_check(checks, "auditability", "Repo auditability", audit_status, "The repo is auditable." if audit_status == "pass" else "Only partial deployable source is visible." if audit_status == "warn" else "The repo does not look like a deployable audit artifact.", audit_evidence, "Expose the exact deployable source or artifact path.")
+        repro_evidence = repo.pinned_bases + repo.pinned_images + repo.ci_repro_hits + repo.variable_images + [f"lockfiles: {', '.join(repo.lockfiles[:4]) or 'none'}"]
         repro_status = "pass" if (repo.pinned_bases or repo.pinned_images) and repo.lockfiles and repo.ci_repro_hits and not repo.variable_images else "fail" if repo.variable_images or not (repo.pinned_bases or repo.pinned_images) else "warn"
-        add_check(checks, "reproducibility", "Reproducibility", repro_status, "The repo shows reproducibility evidence." if repro_status == "pass" else "Mutable image refs or missing digest pinning block reproducibility." if repro_status == "fail" else "Some reproducibility signals exist, but they are incomplete.", repo.pinned_bases + repo.pinned_images + repo.ci_repro_hits + repo.variable_images + [f"lockfiles: {', '.join(repo.lockfiles[:4]) or 'none'}"], "Pin bases and images by digest, then document hash reproduction.")
+        repro_summary = "The repo shows reproducibility evidence." if repro_status == "pass" else "Mutable image refs or missing digest pinning block reproducibility." if repro_status == "fail" else "Some reproducibility signals exist, but they are incomplete."
+        if rebuild_verify:
+            rebuild_status, rebuild_notes, rebuild_evidence = verify_rebuild(Path(repo.root), repo, live)
+            repo.rebuild_notes.extend(rebuild_notes)
+            if rebuild_evidence:
+                repro_evidence = rebuild_evidence + repro_evidence
+            if rebuild_status:
+                repro_status = rebuild_status
+                repro_summary = "Rebuild verification matched deployed digest." if rebuild_status == "pass" else "Rebuild verification did not match deployed digest."
+            elif rebuild_notes:
+                repro_summary = f"{repro_summary} (rebuild verify skipped: {', '.join(rebuild_notes)})"
+        add_check(checks, "reproducibility", "Reproducibility", repro_status, repro_summary, repro_evidence, "Pin bases and images by digest, then document hash reproduction.")
         operator_status_repo = "fail" if repo.variable_images or repo.configurable_url_hits or repo.key_material_hits else "warn" if repo.allowed_env_hits or repo.infra_secret_hits else "pass"
         operator_evidence = repo.variable_images + repo.configurable_url_hits + repo.key_material_hits + repo.allowed_env_hits + repo.infra_secret_hits
         operator_status_live = "skip"
@@ -777,6 +898,8 @@ def main() -> int:
     parser.add_argument("--write-report", help="Optional output path")
     parser.add_argument("--report-language", default="en", help="Report language (default: en)")
     parser.add_argument("--evidence-dir", help="Optional directory to write evidence snapshots")
+    parser.add_argument("--no-rebuild-verify", dest="rebuild_verify", action="store_false", help="Disable rebuild verification")
+    parser.set_defaults(rebuild_verify=True)
     args = parser.parse_args()
     cleanup_dir = None
     try:
@@ -785,7 +908,7 @@ def main() -> int:
         repo_root, cleanup_dir = prepare_repo(args.repo)
         repo = collect_repo(repo_root, args.repo) if repo_root else None
         live = collect_live(args.url, args.attestation_url, args.app_id, args.cluster_domain) if args.url else None
-        checks = build_checks(repo, live)
+        checks = build_checks(repo, live, rebuild_verify=args.rebuild_verify)
         summary = summarize(checks, live)
         payload = {
             "summary": summary,

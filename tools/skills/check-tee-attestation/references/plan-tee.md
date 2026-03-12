@@ -1,209 +1,209 @@
-﻿# TEE / DevProof 审计最佳方案（综合 hermes + is-this-real-tea + devproof-audits-guide）
+﻿# Best-Practice TEE / DevProof Audit Plan (synthesized from hermes + is-this-real-tea + devproof-audits-guide)
 
-本方案面向第三方审计：验证 TEE 应用是否真的让开发者或运营方“不能作恶”，而不仅是“跑在 TEE 里”。核心目标是证明 operator gap 是否被关闭：运营方是否还能通过配置、升级或后门悄悄窃取用户数据。
-
----
-
-## 一、目标与原则
-
-- 目标：给出可验证、可复现的结论，回答“运营方能否偷数据、偷密钥、无通知升级”。
-- 原则：
-- 只信硬证据链：源码 -> 构建产物 -> 部署配置 -> 硬件证明。
-- 不信自述：应用自带 /attestation 仅作参考，关键证据必须来自 8090、Trust Center 或链上。
-- 以 operator gap 为中心：能否通过 allowed_envs、变量镜像、配置 URL 实现数据外流。
-- 审计当前 + 可追溯历史：不仅验证“现在安全”，还要能回答“过去是否安全”。
+This plan targets third-party audits: verify whether a TEE app truly prevents the developer or operator from misbehaving, not merely "running inside a TEE." The core goal is to prove the operator gap is closed: can the operator still exfiltrate user data through config, upgrades, or backdoors?
 
 ---
 
-## 二、输入与证据清单
+## 1. Goals and Principles
 
-- 必需：
-- GitHub URL 或本地源码路径
-- 部署 URL（或 app_id + cluster）
-- 可选但强烈建议：
-- 8090 端点快照：https://{app_id}-8090.{cluster}.phala.network/
-- Trust Center 链接：https://trust.phala.com/app/{app_id}
-- Cloud API attestation：https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations
-- 应用 /attestation 返回（用于 TLS 绑定）
-- 证据快照（quote.json、metadata、证书 PEM、sha256sum）
+- Goal: produce a verifiable, reproducible conclusion that answers: "Can the operator steal data, keys, or upgrade without notice?"
+- Principles:
+- Trust only hard evidence chains: source code -> build artifacts -> deployment config -> hardware proof.
+- Do not trust self-claims: in-app `/attestation` is only a reference; key evidence must come from 8090, Trust Center, or on-chain records.
+- Center on the operator gap: can `allowed_envs`, variable images, or configurable URLs enable data exfiltration?
+- Audit present state and historical traceability: not only "safe now," but also "safe in the past."
 
 ---
 
-## 三、快速分流（5 分钟）
+## 2. Inputs and Evidence Checklist
 
-满足以下任何一条，直接判定 Stage 0（可作恶）并进入深度审计：
-
-1. 8090 无 TDX quote（--dev-os）
-2. docker_compose_file 中存在 ${VAR} 控制 URL 或镜像
-3. 镜像未使用 @sha256: 固定
-4. KMS 是 Pha KMS 且无链上 AppAuth 或 Timelock
-5. TLS 不是 passthrough（443s），无法做端到端绑定
+- Required:
+- GitHub URL or local source path
+- Deployment URL (or `app_id` + `cluster`)
+- Optional but strongly recommended:
+- 8090 snapshot: `https://{app_id}-8090.{cluster}.phala.network/`
+- Trust Center: `https://trust.phala.com/app/{app_id}`
+- Cloud API attestation: `https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations`
+- App `/attestation` response (for TLS binding)
+- Evidence snapshots (`quote.json`, `metadata`, TLS cert PEM, `sha256sum`)
 
 ---
 
-## 四、完整审计流程（推荐 7 阶段）
+## 3. Fast Triage (5 minutes)
 
-### Phase 0：威胁模型与范围锁定
+If any of the following is true, immediately classify as Stage 0 (operator can misbehave) and proceed to deep audit:
 
-- 明确应用的安全承诺（例如“运营方看不到私钥或未发布内容”）
-- 明确用户数据路径与保密边界（TEE 内 / TEE 外）
-- 明确是否为自托管或平台托管（Phala/dstack）
+1. No TDX quote from 8090 (`--dev-os`)
+2. `${VAR}` controls URLs or images in `docker_compose_file`
+3. Images are not pinned by `@sha256:`
+4. KMS is Pha KMS and there is no on-chain AppAuth or timelock
+5. TLS is not passthrough (443s), so end-to-end binding is impossible
 
-### Phase 1：独立获取 Attestation 证据
+---
 
-1. 从部署 URL 解析 app_id + cluster
-2. 拉取 8090 元数据，解析 app_compose（关键真相来源）
-3. 计算 compose_hash（SHA256 of canonical JSON）
-4. 拉取 Cloud API 补充 quote / event_log / vm_config
-5. 拉取 Trust Center 作为硬件 attestation 旁证
+## 4. Full Audit Flow (recommended 7 phases)
 
-关键输出：
-- app_compose（含 docker_compose_file、allowed_envs、kms_enabled、pre_launch_script）
-- compose_hash
-- quote_hex + RTMR / MR* 相关字段
+### Phase 0: Threat Model and Scope
 
-### Phase 2：硬件证明验证
+- Clarify security claims (e.g., "operator cannot see private keys or unpublished content")
+- Define data paths and confidentiality boundaries (inside TEE / outside TEE)
+- Identify hosting model (self-hosted vs platform-hosted like Phala/dstack)
 
-- 使用 dcap-qvl 验证 TDX quote 签名
-- 如无法使用，退化为手动解析 quote（只提取字段，不做签名验证）
-- 校验 compose_hash 是否匹配 mr_config_id
-- 若有 report_data，验证其绑定内容（例如 TLS cert 指纹）
-- 若可用，调用 dstack-verifier 进行 event log replay
+### Phase 1: Independent Attestation Evidence
 
-### Phase 3：TLS 绑定与域名信任模型
+1. Resolve `app_id` + `cluster` from the deployment URL
+2. Fetch 8090 metadata and parse `app_compose` (ground truth)
+3. Compute `compose_hash` (SHA256 of canonical JSON)
+4. Fetch Cloud API for `quote` / `event_log` / `vm_config`
+5. Fetch Trust Center as secondary attestation evidence
 
-- 判断 URL 是否为 TLS passthrough（443s）
-- 若 passthrough：
-- 获取实时 TLS 证书指纹
-- 对比 /attestation 的 certFingerprint
-- 若为自定义域名：
-- 获取 _dstack-app-address TXT 记录
-- 建议启用 CT 监控（Certspotter / crt.sh）
-- 解释信任层级：浏览器依赖 CT 可检测，SDK 应做 attested TLS
+Key outputs:
+- `app_compose` (includes `docker_compose_file`, `allowed_envs`, `kms_enabled`, `pre_launch_script`)
+- `compose_hash`
+- `quote_hex` + RTMR / MR* fields
 
-### Phase 4：源码审计（operator gap 核心）
+### Phase 2: Hardware Proof Verification
 
-必须逐行追踪数据流：
+- Verify the TDX quote signature with dcap-qvl
+- If unavailable, fall back to manual parsing (extract fields only, no signature verification)
+- Check whether `compose_hash` matches `mr_config_id`
+- If `report_data` exists, validate bindings (e.g., TLS cert fingerprint)
+- If available, replay event logs with `dstack-verifier`
 
-- 配置性 URL：
-- 在 docker-compose.yml / app_compose 中搜索 ${VAR}
-- 对照 allowed_envs，定位可被运营方替换的 URL
-- 若 URL 处理用户数据 -> 高危
+### Phase 3: TLS Binding and Domain Trust Model
 
-- 外部网络调用：
-- 查 fetch/axios/requests 等
-- 确认每个外部请求携带的用户数据
+- Determine if the URL is TLS passthrough (443s)
+- If passthrough:
+- Capture the live TLS cert fingerprint
+- Compare to `/attestation` `certFingerprint`
+- If a custom domain is used:
+- Resolve `_dstack-app-address` TXT records
+- Recommend CT monitoring (Certspotter / crt.sh)
+- Explain trust boundary: browsers rely on CT; SDKs should use attested TLS
 
-- attestation 使用是否“强制执行”：
-- 是否只是 log 而不中断
-- 是否存在 known issue / mismatch ignore
+### Phase 4: Source Audit (operator gap core)
 
-- 密钥与 KMS：
-- 是否使用 TEE 内 deriveKey
-- 是否存在硬编码 fallback
-- 是否允许环境变量注入密钥
+Trace data flow line-by-line:
 
-- 构建可复现性：
-- Dockerfile 是否 pin base digest
-- 是否 SOURCE_DATE_EPOCH / rewrite-timestamp
-- 锁文件是否完整
+- Configurable URLs:
+- Search `${VAR}` in `docker-compose.yml` / `app_compose`
+- Cross-check `allowed_envs` to find operator-controlled URLs
+- If the URL handles user data -> high risk
 
-- 升级与治理：
-- 是否接入 AppAuth / on-chain compose registry
-- 是否 timelock
-- 是否有 DEPLOYMENTS.md 或 on-chain 记录
+- External network calls:
+- Find `fetch` / `axios` / `requests` usage
+- Identify user data in each outgoing request
 
-### Phase 5：部署配置与源码交叉验证
+- Attestation enforcement:
+- Is attestation only logged without blocking execution?
+- Are known issues or mismatches ignored?
 
-- 比对 8090 docker_compose_file 与仓库中 compose
-- 镜像是否为 digest 固定
-- 是否存在 ${IMAGE_VAR} + allowed_envs 盲区
-- 从镜像 tag 找出真实部署 commit（不要审计 branch HEAD）
+- Keys and KMS:
+- Is `deriveKey` used inside the TEE?
+- Any hardcoded fallback?
+- Can keys be injected via env vars?
 
-### Phase 6：DevProof 阶段判定（ERC-733）
+- Build reproducibility:
+- Is base image pinned by digest?
+- `SOURCE_DATE_EPOCH` / timestamp normalization present?
+- Lockfiles complete?
 
-Stage 0 触发条件（任意即失败）：
-- 无 TDX quote
-- 允许运营方配置数据通道（URL/endpoint）
-- 镜像未固定 digest
-- 无链上透明升级
+- Upgrades and governance:
+- AppAuth / on-chain compose registry enabled?
+- Timelock enforced?
+- `DEPLOYMENTS.md` or on-chain history present?
 
-Stage 1 必须全部满足：
-- on-chain KMS + AppAuth
-- 镜像 digest 固定
-- no exfiltration vector
-- TLS 绑定验证通过
-- 可复现构建
-- 升级 timelock
+### Phase 5: Deploy Config vs Source Cross-Check
 
-### Phase 7：报告与证据归档
+- Compare 8090 `docker_compose_file` with repo compose files
+- Are image refs pinned by digest?
+- Are there `${IMAGE_VAR}` + `allowed_envs` blind spots?
+- Map image tags to the exact deployed commit (do not audit `HEAD`)
 
-- 报告必须包含：
+### Phase 6: DevProof Stage Decision (ERC-733)
+
+Stage 0 triggers (any = fail):
+- No TDX quote
+- Operator-configurable data channel (URL/endpoint)
+- Images not pinned by digest
+- No on-chain transparent upgrade
+
+Stage 1 must satisfy all:
+- On-chain KMS + AppAuth
+- Image digest pinned
+- No exfiltration vector
+- TLS binding verified
+- Reproducible builds
+- Upgrade timelock
+
+### Phase 7: Report and Evidence Archiving
+
+- Report must include:
 - Executive Summary
-- 关键问题表格（operator gap / attestation / reproducibility / data flow / upgrades）
-- Critical Findings（含 file:line 与可复现步骤）
-- Trust Boundary 图
-- “能保证什么 / 不能保证什么”
-- 未能验证的部分（原因）
+- Key questions table (operator gap / attestation / reproducibility / data flow / upgrades)
+- Critical Findings (with file:line and reproduction steps)
+- Trust Boundary diagram
+- "What is guaranteed / not guaranteed"
+- Unverified parts (and why)
 
-- 证据快照建议：
-- evidences/YYYY-MM-DD/metadata.json
-- quote.json, cert.pem, sha256sum.txt, deploy-info.json
-- 保存在 git 中以构建历史可追溯性
-
----
-
-## 五、最佳实践总结（来自三仓库的结论融合）
-
-- operator gap 是 1 号风险：任何可配置 URL 都可能变成数据外流通道。
-- 8090 是第三方审计唯一可信来源：应用自身 /attestation 不足。
-- 链上透明日志是 DevProof 的核心：Pha KMS 只能证明“现在”，不能证明“过去”。
-- 镜像 digest 固定是最小要求：tag 仍可被覆盖。
-- 可复现构建决定“源码可审计”是否成立。
-- 自定义域名不是漏洞，但需要 CT 监控 + attested TLS。
-- 证据应持久化：/evidences 覆写是常见盲区。
+- Evidence snapshot suggestions:
+- `evidences/YYYY-MM-DD/metadata.json`
+- `quote.json`, `cert.pem`, `sha256sum.txt`, `deploy-info.json`
+- Keep in git for audit history
 
 ---
 
-## 六、可复用检查清单（精简版）
+## 5. Best-Practice Summary (synthesized from the three repos)
 
-1. 8090 拿到 app_compose + quote
-2. compose_hash 匹配 mr_config_id
-3. docker_compose_file 中无 ${VAR} 控制 URL 或镜像
-4. 镜像使用 @sha256: 固定
-5. KMS 为 Base/on-chain，AppAuth + timelock
-6. TLS 证书指纹与 attestation 匹配
-7. 构建可复现（pin base + SOURCE_DATE_EPOCH + lockfile）
-8. 无 dev fallback / known issue bypass
-9. 数据流不出 TEE 或出 TEE 前已加密
-10. 有升级历史记录（链上或 DEPLOYMENTS.md）
+- The operator gap is the #1 risk: any configurable URL can become an exfiltration channel.
+- 8090 is the only trusted source for third-party audits; in-app `/attestation` is insufficient.
+- On-chain transparency logs are the core of DevProof: Pha KMS can only prove "now," not "the past."
+- Image digest pinning is the minimum bar: tags can be overwritten.
+- Reproducible builds determine whether "source is auditable" is actually true.
+- Custom domains are not a vulnerability by themselves, but require CT monitoring + attested TLS.
+- Evidence must be durable: overwriting `/evidences` is a common blind spot.
 
 ---
 
-## 七、建议输出格式（模板）
+## 6. Reusable Checklist (condensed)
 
-审计完最终生成的报告必须是英文版。
+1. 8090 provides `app_compose` + quote
+2. `compose_hash` matches `mr_config_id`
+3. No `${VAR}` controls URLs or images in `docker_compose_file`
+4. Images are pinned by `@sha256:`
+5. KMS is Base/on-chain; AppAuth + timelock
+6. TLS cert fingerprint matches attestation
+7. Build is reproducible (pinned base + `SOURCE_DATE_EPOCH` + lockfiles)
+8. No dev fallback or known-issue bypass
+9. Data does not leave the TEE, or is encrypted before leaving
+10. Upgrade history is recorded (on-chain or `DEPLOYMENTS.md`)
 
-### 通俗易懂版（不使用 Stage 术语）
+---
 
-用“一眼判定卡”替代 Stage 结论，强调结论与原因：
+## 7. Suggested Output Format (template)
 
-一句话结论：运营方能否偷数据（能/不能/部分能）+ 关键原因 1 条。
+The final report must be in English.
 
-可视化模板（打勾矩阵 + 红黄绿信号）：
+### Plain-Language Version (no Stage terms)
+
+Replace Stage language with a one-glance decision card focused on conclusion and reasons:
+
+One-line conclusion: "Can the operator steal data? (Yes/No/Partially)" + one key reason.
+
+Visual template (check matrix + red/yellow/green signal):
 
 ```
-一眼判定：能/不能/部分能 + 关键原因
+One-glance decision: Can/Can’t/Partially + key reason
 
-| 关键问题 | 状态 | 信号 | 证据摘要 |
+| Key Question | Status | Signal | Evidence Summary |
 |---|---|---|---|
-| 运营方能否偷数据 | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | 例如：allowed_envs 可改 URL |
-| 硬件是否真的在证明 | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | 例如：TDX quote 已验证 |
-| 部署是否可复现 | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | 例如：镜像 digest 固定 |
-| 数据是否离开 TEE | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | 例如：外部 DB/LLM |
-| 升级是否可追溯 | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | 例如：Base KMS + timelock |
+| Can the operator exfiltrate data? | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | e.g., allowed_envs can alter URLs |
+| Is hardware attestation real? | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | e.g., TDX quote verified |
+| Is deployment reproducible? | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | e.g., image digest pinned |
+| Does data leave the TEE? | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | e.g., external DB/LLM |
+| Are upgrades traceable? | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | e.g., Base KMS + timelock |
 
-信号说明：GREEN=关键项闭合；YELLOW=部分满足或关键空白；RED=存在可作恶路径
+Signal legend: GREEN = closed; YELLOW = partial/unknown; RED = exploitable path
 ```
 
 ```markdown
@@ -240,26 +240,25 @@ Stage 1 必须全部满足：
 
 ---
 
-## 八、与现有工具的对接建议
+## 8. Integration With Existing Tools
 
-- 使用 is-this-real-tea 的 6-phase pipeline 作为自动化基线
-- 用 devproof 的 Stage 1 checklist 做最终判定
-- 用 hermes 的“证据链闭环”方法：
-- 源码 commit -> CI digest -> compose_hash -> TDX quote -> Trust Center
-- 将每次部署证据归档到 evidences/
+- Use the 6-phase pipeline in is-this-real-tea as the automation baseline
+- Use the DevProof Stage 1 checklist for final judgment
+- Use hermes’ evidence-chain closure method:
+- Source commit -> CI digest -> compose_hash -> TDX quote -> Trust Center
+- Archive each deployment in `evidences/`
 
 ---
 
-## 九、最终结论标准
+## 9. Final Decision Standard
 
-只有当以下证据链全部闭合，才可宣称“开发者不能作恶”：
+Only if all evidence chains are closed can you claim "the developer cannot misbehave":
 
-1. 代码可审计 + 可复现构建
-2. 镜像 digest 固定 + compose_hash 与 quote 匹配
-3. on-chain 透明升级 + timelock
-4. 无 operator-configurable 数据通道
-5. TLS 端到端绑定到 TEE
-6. 证据可追溯（历史可审计）
+1. Auditable code + reproducible builds
+2. Image digest pinned + `compose_hash` matches quote
+3. On-chain transparent upgrades + timelock
+4. No operator-configurable data channels
+5. End-to-end TLS bound to the TEE
+6. Historical evidence is traceable (audit history)
 
-否则默认结论：Stage 0（可作恶）。
-
+Otherwise, default conclusion: Stage 0 (operator can misbehave).
