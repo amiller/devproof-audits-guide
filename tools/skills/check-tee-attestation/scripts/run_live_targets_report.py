@@ -114,25 +114,93 @@ def pick_repo(entry: dict) -> str | None:
 
 
 def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) -> tuple[str, str | None, str | None, bool]:
-    def resolve_remote_commit(short_commit: str) -> tuple[str, str | None]:
+    def get_default_branch(repo_dir: Path) -> str | None:
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            ref = result.stdout.strip()
+            prefix = "refs/remotes/origin/"
+            if ref.startswith(prefix):
+                return ref[len(prefix):]
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "remote", "show", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("HEAD branch:"):
+                    return line.split(":", 1)[1].strip()
+        return None
+
+    def is_shallow_repo(repo_dir: Path) -> bool:
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
+    def fetch_full_history(repo_dir: Path, default_branch: str | None) -> tuple[bool, str | None]:
+        # Fetch full history so we can resolve short SHAs anywhere in the repo.
+        if is_shallow_repo(repo_dir):
+            result = subprocess.run(
+                ["git", "-C", str(repo_dir), "fetch", "--unshallow", "--tags", "origin"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                return True, "fetched full history (unshallow)"
+            # Fallback for older Git servers.
+            result = subprocess.run(
+                ["git", "-C", str(repo_dir), "fetch", "--depth", "2147483647", "--tags", "origin"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                return True, "fetched full history (deep fetch)"
+            return False, result.stderr.strip() or result.stdout.strip() or "full history fetch failed"
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "fetch", "--tags", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True, None
+        if default_branch:
+            result = subprocess.run(
+                ["git", "-C", str(repo_dir), "fetch", "--tags", "origin", default_branch],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                return True, None
+        return False, result.stderr.strip() or result.stdout.strip() or "full history fetch failed"
+
+    def resolve_local_commit(repo_dir: Path, short_commit: str) -> tuple[str, str | None]:
         if not short_commit or len(short_commit) >= 40:
             return short_commit, None
-        result = subprocess.run(["git", "ls-remote", repo_url], capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            return short_commit, "ls-remote failed while resolving commit prefix"
-        matches = []
-        for line in result.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 2:
-                continue
-            sha = parts[0].strip()
-            if sha.startswith(short_commit):
-                matches.append(sha)
-        if len(matches) == 1:
-            return matches[0], f"resolved commit prefix {short_commit} -> {matches[0]}"
-        if len(matches) > 1:
-            return short_commit, "commit prefix is ambiguous on remote"
-        return short_commit, "commit prefix not found on remote"
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "--verify", f"{short_commit}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            resolved = result.stdout.strip()
+            return resolved, f"resolved commit prefix {short_commit} -> {resolved}"
+        return short_commit, result.stderr.strip() or result.stdout.strip() or "commit prefix not found in local history"
 
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     temp_dir = tempfile.mkdtemp(prefix="live-target-repo-", dir=str(TMP_ROOT))
@@ -146,24 +214,38 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
     if result.returncode != 0:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git clone failed")
-    note = None
+    note_parts: list[str] = []
     checked_out = True
     if repo_commit:
-        resolved_commit, resolve_note = resolve_remote_commit(repo_commit)
-        if resolve_note:
-            note = resolve_note if not note else f"{note}; {resolve_note}"
+        resolved_commit = repo_commit
+        if len(repo_commit) < 40:
+            note_parts.append("short commit provided; resolving locally after fetching history")
         result = subprocess.run(["git", "-C", str(clone_dir), "checkout", resolved_commit], capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            fetch = subprocess.run(["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", resolved_commit], capture_output=True, text=True, check=False)
-            if fetch.returncode == 0:
-                result = subprocess.run(["git", "-C", str(clone_dir), "checkout", resolved_commit], capture_output=True, text=True, check=False)
-            if result.returncode != 0 and repo_branch:
-                deepen = subprocess.run(["git", "-C", str(clone_dir), "fetch", "--depth", "200", "origin", repo_branch], capture_output=True, text=True, check=False)
-                if deepen.returncode == 0:
+            if len(resolved_commit) >= 40:
+                fetch = subprocess.run(
+                    ["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", resolved_commit],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if fetch.returncode == 0:
+                    result = subprocess.run(["git", "-C", str(clone_dir), "checkout", resolved_commit], capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                default_branch = repo_branch or get_default_branch(clone_dir)
+                fetched, fetch_note = fetch_full_history(clone_dir, default_branch)
+                if fetch_note:
+                    note_parts.append(fetch_note)
+                if fetched and len(repo_commit) < 40:
+                    resolved_commit, resolve_note = resolve_local_commit(clone_dir, repo_commit)
+                    if resolve_note:
+                        note_parts.append(resolve_note)
+                if fetched:
                     result = subprocess.run(["git", "-C", str(clone_dir), "checkout", resolved_commit], capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            note = result.stderr.strip() or result.stdout.strip() or "git checkout failed"
+            note_parts.append(result.stderr.strip() or result.stdout.strip() or "git checkout failed")
             checked_out = False
+    note = "; ".join([n for n in note_parts if n]) or None
     return str(clone_dir), temp_dir, note, checked_out
 
 
