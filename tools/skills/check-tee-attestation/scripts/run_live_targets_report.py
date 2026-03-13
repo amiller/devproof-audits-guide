@@ -269,11 +269,13 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
             try:
                 repo_arg, cleanup_dir, repo_note, checked_out = clone_repo(repo_value, repo_branch, repo_commit)
                 if repo_commit and not checked_out:
+                    resolution_log = repo_note
                     if repo_note:
                         repo_note = f"{repo_note}; commit checkout failed; skipping target"
                     else:
                         repo_note = "commit checkout failed; skipping target"
-                    return False, name, {"error": f"commit checkout failed: {repo_note}"}, cleanup_dir, repo_note
+                    resolution_line = resolution_log or "(no resolution log captured)"
+                    return False, name, {"error": f"commit checkout failed: {repo_note}\ncommit resolution log: {resolution_line}"}, cleanup_dir, repo_note
             except RuntimeError as exc:
                 return False, name, {"error": str(exc)}, cleanup_dir, repo_note
         else:
@@ -290,11 +292,13 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
                         if repo_note_clone:
                             repo_note = f"{repo_note}; {repo_note_clone}"
                         if repo_commit and not checked_out:
+                            resolution_log = repo_note
                             if repo_note:
                                 repo_note = f"{repo_note}; commit checkout failed; skipping target"
                             else:
                                 repo_note = "commit checkout failed; skipping target"
-                            return False, name, {"error": f"commit checkout failed: {repo_note}"}, cleanup_dir, repo_note
+                            resolution_line = resolution_log or "(no resolution log captured)"
+                            return False, name, {"error": f"commit checkout failed: {repo_note}\ncommit resolution log: {resolution_line}"}, cleanup_dir, repo_note
                     except RuntimeError as exc:
                         return False, name, {"error": str(exc)}, cleanup_dir, repo_note
                 else:
