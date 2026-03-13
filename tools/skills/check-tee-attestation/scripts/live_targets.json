@@ -29,7 +29,7 @@
       "name": "hermes",
       "repo": "case-studies/hermes",
       "repo_url": "https://github.com/jameslbarnes/hermes",
-      "repo_commit": "a3cf0e6",
+      "repo_commit": "922e2f9",
       "app_id": "db82f581256a3c9244c4d7129a67336990d08cdf",
       "notes": "Commit pinned from attested image tag in case study (hermes:a3cf0e6).",
       "url": "https://hermes.teleport.computer",
