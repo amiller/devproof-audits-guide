@@ -43,6 +43,7 @@ class RepoFacts:
     root: str | None = None
     target: str | None = None
     remote_url: str | None = None
+    git_head: str | None = None
     source_file_count: int = 0
     compose_files: list[str] = field(default_factory=list)
     dockerfiles: list[str] = field(default_factory=list)
@@ -69,6 +70,8 @@ class RepoFacts:
 class LiveFacts:
     url: str | None = None
     reachable: bool = False
+    app_id: str | None = None
+    cluster_domain: str | None = None
     main_url_ok: bool | None = None
     main_url_status: int | None = None
     main_url_error: str | None = None
@@ -306,6 +309,12 @@ def collect_repo(repo_root: Path, target: str) -> RepoFacts:
         result = subprocess.run(["git", "-C", str(repo_root), "remote", "get-url", "origin"], capture_output=True, text=True, check=False)
         if result.returncode == 0:
             facts.remote_url = result.stdout.strip() or None
+    except FileNotFoundError:
+        pass
+    try:
+        result = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            facts.git_head = result.stdout.strip() or None
     except FileNotFoundError:
         pass
     facts.pinned_images = grep(repo_root, compose_files, [r"image:\s*\S+@sha256:[0-9a-f]{32,}"])
@@ -654,6 +663,10 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
                 resolved_app_id = parsed_host["app_id"]
                 resolved_cluster = parsed_host["cluster"]
                 facts.notes.append(f"resolved _dstack-app-address to {resolved_host}")
+    if resolved_app_id:
+        facts.app_id = resolved_app_id
+    if resolved_cluster:
+        facts.cluster_domain = resolved_cluster
     def cluster_host(value: str) -> str:
         return value if value.endswith(".phala.network") else f"{value}.phala.network"
 
@@ -987,6 +1000,110 @@ def build_one_glance(checks: list) -> list[dict[str, str]]:
     return rows
 
 
+def build_verification_checklist(repo: RepoFacts | None, live: LiveFacts | None, checks: list[Check]) -> list[dict[str, object]]:
+    by_category = {c.category: c for c in checks}
+    attestation_check = by_category.get("attestation")
+    tls_check = by_category.get("tls_binding")
+    repro_check = by_category.get("reproducibility")
+    operator_check = by_category.get("operator_gap")
+    upgrade_check = by_category.get("upgrade_transparency")
+
+    app_id = live.app_id if live else None
+    cluster = live.cluster_domain if live else None
+    trust_center = f"https://trust.phala.com/app/{app_id}" if app_id else None
+    cloud_api = f"https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations" if app_id else None
+
+    deployed_digests = []
+    if live:
+        deployed_digests = parse_image_digests(live.docker_compose_images_pinned)
+
+    def status_from_check(check: Check | None, fallback: str = "skip") -> str:
+        return check.status if check else fallback
+
+    checklist: list[dict[str, object]] = []
+
+    checklist.append(
+        {
+            "title": "A. Identify the exact deployment",
+            "status": "pass" if live and live.url else "skip",
+            "summary": "Deployment identifiers captured." if live and live.url else "No live URL provided.",
+            "answers": [
+                f"App ID: {app_id or 'unverified'}",
+                f"Live URL: {live.url if live else 'not provided'}",
+                f"Attestation endpoint: {live.attestation_url if live and live.attestation_url else 'not found'}",
+                f"Trust Center: {trust_center or 'unverified'}",
+                f"Cloud API: {cloud_api or 'unverified'}",
+                f"Cluster domain: {cluster or 'unverified'}",
+            ],
+        }
+    )
+
+    checklist.append(
+        {
+            "title": "B. Verify attestation exists and is valid",
+            "status": status_from_check(attestation_check),
+            "summary": attestation_check.summary if attestation_check else "Attestation not evaluated.",
+            "answers": [
+                f"Attestation reachable: {'yes' if live and live.attestation_found else 'no'}",
+                f"Compose hash match: {live.compose_hash_match if live and live.compose_hash_match is not None else 'unverified'}",
+                "Quote signature verified: unverified (dcap-qvl not run by checker)",
+            ],
+        }
+    )
+
+    checklist.append(
+        {
+            "title": "C. Verify TLS binding",
+            "status": status_from_check(tls_check),
+            "summary": tls_check.summary if tls_check else "TLS binding not evaluated.",
+            "answers": [
+                f"TLS fingerprint: {live.cert_fingerprint if live and live.cert_fingerprint else 'unverified'}",
+                f"Attested cert match: {live.tls_binding_match if live and live.tls_binding_match is not None else 'unverified'}",
+                "Boundary: document gateway vs app if TLS terminates outside the app TEE.",
+            ],
+        }
+    )
+
+    checklist.append(
+        {
+            "title": "D. Verify source -> image",
+            "status": status_from_check(repro_check),
+            "summary": repro_check.summary if repro_check else "Rebuild verification not evaluated.",
+            "answers": [
+                f"Repo commit: {repo.git_head if repo and repo.git_head else 'unverified'}",
+                f"Deployed image digest(s): {', '.join(deployed_digests) if deployed_digests else 'unverified'}",
+                "Rebuild result: see reproducibility check for mismatch or failure reason.",
+            ],
+        }
+    )
+
+    checklist.append(
+        {
+            "title": "E. Operator-gap checks",
+            "status": status_from_check(operator_check),
+            "summary": operator_check.summary if operator_check else "Operator gap not evaluated.",
+            "answers": [
+                "If any URL or image appears in allowed_envs, operator can steer data or swap code.",
+                "If image: ${VAR} where VAR is in allowed_envs, deployment is unverifiable to third parties.",
+            ],
+        }
+    )
+
+    checklist.append(
+        {
+            "title": "F. Upgrade transparency",
+            "status": status_from_check(upgrade_check),
+            "summary": upgrade_check.summary if upgrade_check else "Upgrade transparency not evaluated.",
+            "answers": [
+                "Look for public upgrade logs (on-chain or release history).",
+                "If no public log exists, treat as a transparency gap.",
+            ],
+        }
+    )
+
+    return checklist
+
+
 def render_text(payload: dict) -> str:
     summary = payload["summary"]
     lines = [f"Verdict: {summary['verdict']}", f"Stage:   {summary['stage']}", f"Score:   {summary['score']}/100"]
@@ -999,6 +1116,14 @@ def render_text(payload: dict) -> str:
     for row in build_one_glance(payload["checks"]):
         evidence = f" | {row['evidence']}" if row["evidence"] else ""
         lines.append(f"- {row['dimension']}: {row['status']} / {signal_to_emoji(row['signal'])}{evidence}")
+    checklist = payload.get("verification_checklist") or []
+    if checklist:
+        lines.append("")
+        lines.append("Verification checklist:")
+        for item in checklist:
+            lines.append(f"- {item['title']} ({item['status'].upper()}): {item['summary']}")
+            for answer in item.get("answers", [])[:3]:
+                lines.append(f"    {answer}")
     if summary["critical_blockers"]:
         lines.append("Critical blockers:")
         for blocker in summary["critical_blockers"]:
@@ -1025,6 +1150,17 @@ def render_markdown(payload: dict) -> str:
         evidence = row["evidence"].replace("|", "\\|") if row["evidence"] else ""
         signal = signal_to_emoji(row["signal"])
         lines.append(f"| {row['dimension']} | {row['status']} | {signal} | {evidence} |")
+    checklist = payload.get("verification_checklist") or []
+    if checklist:
+        lines.extend(["", "## Verification Checklist", ""])
+        for item in checklist:
+            lines.append(f"### {item['title']}")
+            lines.append("")
+            lines.append(f"- Status: {item['status'].upper()}")
+            lines.append(f"- Summary: {item['summary']}")
+            for answer in item.get("answers", [])[:5]:
+                lines.append(f"- {answer}")
+            lines.append("")
     if summary["critical_blockers"]:
         lines.extend(["", "## Critical Blockers", ""])
         for blocker in summary["critical_blockers"]:
@@ -1045,6 +1181,8 @@ def write_evidence(dir_path: Path, live: LiveFacts | None, repo: RepoFacts | Non
     metadata = {
         "summary": summary,
         "live_url": live.url if live else None,
+        "app_id": live.app_id if live else None,
+        "cluster_domain": live.cluster_domain if live else None,
         "main_url_ok": live.main_url_ok if live else None,
         "main_url_status": live.main_url_status if live else None,
         "main_url_error": live.main_url_error if live else None,
@@ -1054,6 +1192,7 @@ def write_evidence(dir_path: Path, live: LiveFacts | None, repo: RepoFacts | Non
         "tls_fingerprint": live.cert_fingerprint if live else None,
         "repo_target": repo.target if repo else None,
         "repo_remote": repo.remote_url if repo else None,
+        "repo_git_head": repo.git_head if repo else None,
     }
     (dir_path / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     if live and live.attestation_body:
@@ -1092,6 +1231,7 @@ def main() -> int:
             "live": asdict(live) if live else None,
             "checks": [asdict(check) for check in checks],
             "one_glance": build_one_glance(checks),
+            "verification_checklist": build_verification_checklist(repo, live, checks),
         }
         rendered = json.dumps(payload, indent=2) if args.format == "json" else render_markdown(payload) if args.format == "markdown" else render_text(payload)
         if args.write_report:

@@ -45,6 +45,84 @@ Use [references/live-checks.md](./references/live-checks.md) and [references/pla
 6. Cross-reference deployed compose vs source.
 7. Evidence archiving for audit history.
 
+## Verification Checklist (Strict Chain)
+
+Use a strict chain: Source -> Build -> Image -> Compose/App-compose -> Attestation -> TLS -> Transparency.
+
+For each target, explicitly answer the prompts below in the report. If any step cannot be verified, say "unverified" and explain why.
+Record the date/time of each live fetch in your notes (local time is fine).
+
+### A. Identify the exact deployment
+
+Prompt to answer:
+- App ID / instance ID?
+- Live URL?
+- Attestation endpoint (8090 or app-specific)?
+- Trust Center / Cloud API / on-chain links?
+
+How to check:
+- Use the provided live URL, attestation URL, and trust center link.
+- If only a custom domain is given, resolve _dstack-app-address to find the 8090 endpoint.
+
+### B. Verify attestation exists and is valid
+
+Prompt to answer:
+- Did you fetch 8090 metadata or the official attestation endpoint?
+- Is a real quote or measurements present (not empty/dev)?
+- Does compose_hash match the app_compose you fetched?
+- Was quote signature verified (dcap-qvl or trusted verifier)?
+
+How to check:
+- Fetch 8090 or app attestation endpoint; extract app_compose.
+- Compute compose_hash from app_compose and compare.
+- If possible, verify the quote signature. If not, mark unverified.
+
+### C. Verify TLS binding
+
+Prompt to answer:
+- What is the live TLS certificate fingerprint?
+- Does it match the attested cert fingerprint or report_data binding?
+- If TLS terminates at a gateway, what is the trust boundary?
+
+How to check:
+- Fetch the live TLS cert and compute sha256 fingerprint.
+- Compare to attested fingerprint (or report_data binding) from attestation payload.
+- If a gateway is involved, explicitly state what is attested (gateway vs app).
+
+### D. Verify source -> image
+
+Prompt to answer:
+- What exact commit is used for deployment?
+- What is the deployed image digest (must be @sha256 in app_compose)?
+- Does a local rebuild match that digest?
+- If rebuild fails, what is the exact failure reason?
+
+How to check:
+- Checkout the exact commit used for deployment (tag/commit from app_compose or evidence).
+- Extract deployed image digest from app_compose.
+- Rebuild with buildx and compare digest; if it fails, capture the error.
+
+### E. Operator-gap checks
+
+Prompt to answer:
+- Are any URLs or image refs in allowed_envs?
+- Are there any image: ${VAR} entries where VAR is in allowed_envs?
+
+How to check:
+- Scan app_compose for allowed_envs.
+- Any URL/image in allowed_envs => operator can steer data or swap code.
+- Any image: ${VAR} with VAR in allowed_envs => deployment is unverifiable to third parties.
+
+### F. Upgrade transparency
+
+Prompt to answer:
+- Are upgrades publicly logged (on-chain or public release history)?
+- If not, what is the transparency gap?
+
+How to check:
+- Look for on-chain upgrade events, public changelog, or pinned digest history.
+- If none, mark as a gap.
+
 ## Output Requirements
 
 - Final report must be in English.
