@@ -150,9 +150,10 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
 
     def fetch_full_history(repo_dir: Path, default_branch: str | None) -> tuple[bool, str | None]:
         # Fetch full history so we can resolve short SHAs anywhere in the repo.
+        all_branches = "+refs/heads/*:refs/remotes/origin/*"
         if is_shallow_repo(repo_dir):
             result = subprocess.run(
-                ["git", "-C", str(repo_dir), "fetch", "--unshallow", "--tags", "origin"],
+                ["git", "-C", str(repo_dir), "fetch", "--unshallow", "--tags", "origin", all_branches],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -161,7 +162,7 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
                 return True, "fetched full history (unshallow)"
             # Fallback for older Git servers.
             result = subprocess.run(
-                ["git", "-C", str(repo_dir), "fetch", "--depth", "2147483647", "--tags", "origin"],
+                ["git", "-C", str(repo_dir), "fetch", "--depth", "2147483647", "--tags", "origin", all_branches],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -170,7 +171,7 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
                 return True, "fetched full history (deep fetch)"
             return False, result.stderr.strip() or result.stdout.strip() or "full history fetch failed"
         result = subprocess.run(
-            ["git", "-C", str(repo_dir), "fetch", "--tags", "origin"],
+            ["git", "-C", str(repo_dir), "fetch", "--tags", "origin", all_branches],
             capture_output=True,
             text=True,
             check=False,
@@ -250,6 +251,14 @@ def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) 
 
 
 def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | None]:
+    def format_checkout_error(note: str | None) -> str:
+        detail = note or "git checkout failed"
+        error = f"commit checkout failed: {detail}"
+        if "commit resolution log:" not in error:
+            resolution_line = note or "(no resolution log captured)"
+            error += f"\ncommit resolution log: {resolution_line}"
+        return error
+
     name = entry.get("name") or "(unknown)"
     repo_value = pick_repo(entry)
     url = entry.get("url")
@@ -269,13 +278,11 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
             try:
                 repo_arg, cleanup_dir, repo_note, checked_out = clone_repo(repo_value, repo_branch, repo_commit)
                 if repo_commit and not checked_out:
-                    resolution_log = repo_note
                     if repo_note:
                         repo_note = f"{repo_note}; commit checkout failed; skipping target"
                     else:
                         repo_note = "commit checkout failed; skipping target"
-                    resolution_line = resolution_log or "(no resolution log captured)"
-                    return False, name, {"error": f"commit checkout failed: {repo_note}\ncommit resolution log: {resolution_line}"}, cleanup_dir, repo_note
+                    return False, name, {"error": format_checkout_error(repo_note)}, cleanup_dir, repo_note
             except RuntimeError as exc:
                 return False, name, {"error": str(exc)}, cleanup_dir, repo_note
         else:
@@ -292,13 +299,11 @@ def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | N
                         if repo_note_clone:
                             repo_note = f"{repo_note}; {repo_note_clone}"
                         if repo_commit and not checked_out:
-                            resolution_log = repo_note
                             if repo_note:
                                 repo_note = f"{repo_note}; commit checkout failed; skipping target"
                             else:
                                 repo_note = "commit checkout failed; skipping target"
-                            resolution_line = resolution_log or "(no resolution log captured)"
-                            return False, name, {"error": f"commit checkout failed: {repo_note}\ncommit resolution log: {resolution_line}"}, cleanup_dir, repo_note
+                            return False, name, {"error": format_checkout_error(repo_note)}, cleanup_dir, repo_note
                     except RuntimeError as exc:
                         return False, name, {"error": str(exc)}, cleanup_dir, repo_note
                 else:
