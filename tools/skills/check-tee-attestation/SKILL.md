@@ -35,6 +35,40 @@ The script gives a verdict, score, stage estimate, blockers, and evidence. Treat
 4. Follow up with manual checks when the live target matters.
 Use [references/live-checks.md](./references/live-checks.md) and [references/plan-tee.md](./references/plan-tee.md).
 
+## Live Targets Report (Batch)
+
+Use the batch runner when you need a full case-studies report across multiple targets.
+
+Run:
+
+```bash
+python scripts/run_live_targets_report.py
+```
+
+Inputs:
+- `scripts/live_targets.json` defines targets, repos, URLs, and attestation endpoints.
+
+Outputs:
+- `case-studies-live-report-YYYY-MM-DD.md` at repo root.
+
+If a target fails, the report will include:
+- `commit resolution log` for repo checkout issues
+- `Run status: failed` with error details
+
+## Commit Resolution Rules (How to Check)
+
+When a target pins `repo_commit` as a short SHA:
+- The runner must fetch full history and all branches before resolving.
+- Resolution happens locally via `git rev-parse <prefix>^{commit}`.
+- If resolution fails, the report must include a `commit resolution log`.
+
+Checklist:
+- If the report says `commit checkout failed`, verify the log includes:
+  - `short commit provided; resolving locally after fetching history`
+  - `fetched full history (unshallow)` or `fetched full history (deep fetch)`
+  - `resolved commit prefix ...` (or an explicit failure reason)
+- If the log does not include these, the runner used an outdated script or did not fetch all branches.
+
 ## Workflow (7 Phases)
 
 1. Threat model and trust claims.
@@ -44,6 +78,224 @@ Use [references/live-checks.md](./references/live-checks.md) and [references/pla
 5. Code audit for operator gap (allowed_envs, ${VAR} URLs, image pinning, KMS).
 6. Cross-reference deployed compose vs source.
 7. Evidence archiving for audit history.
+
+## Step-by-Step Checks (What to Verify)
+
+1. Repo identity
+   - Confirm the repo URL or local path is correct.
+   - If using `repo_commit`, ensure it can be resolved to a full SHA.
+
+2. Live endpoint reachability
+   - `url` returns a valid HTTP response.
+   - If it fails (SSL EOF / timeout), treat results as inconclusive.
+
+3. Attestation presence and integrity
+   - 8090 or explicit attestation endpoint responds.
+   - Extract `app_compose` and verify `compose_hash`.
+
+4. TLS binding
+   - Fetch live cert fingerprint.
+   - Compare to attested fingerprint or report_data.
+
+5. Source-to-image linkage
+   - Identify deployed image digest from `app_compose`.
+   - Rebuild and compare digest.
+   - If rebuild fails, capture the exact error and reason.
+
+6. Operator gap detection
+   - Search for `${VAR}` indirection in images/URLs.
+   - Check `allowed_envs` for secrets, URLs, or image selectors.
+
+7. Upgrade transparency
+   - Look for public changelogs, on-chain releases, or trust center logs.
+   - If missing, mark as a gap.
+
+## Troubleshooting Common Failures
+
+Commit checkout failed:
+- Ensure full history and all branches are fetched.
+- Confirm the short SHA exists in remote history.
+- If the repo uses non-default branches, fetch `refs/heads/*`.
+
+Rebuild failure due to external fetch:
+- Check build args or envs (e.g., version variables for tarball URLs).
+- Missing versions often cause 404 downloads and gzip errors.
+
+No deployed image digest found:
+- The live `app_compose` likely omits image digests.
+- Mark reproducibility as unverifiable and note the gap.
+
+## User-Friendly Usage (Detailed)
+
+### A. Minimal inputs (what users must provide)
+
+Required:
+- `name`: human-friendly target name
+- `repo_url` or `repo`: GitHub URL or local path
+- `url`: live application URL
+
+Strongly recommended:
+- `attestation_url`: 8090 endpoint or explicit attestation report
+- `repo_commit`: short or full SHA from deployed evidence
+
+Optional:
+- `repo_branch`: only when the repo uses a non-default branch
+- `repo_subdir`: if the deployable app is in a subfolder
+- `repo_urls`: list of repos; the runner uses the first entry
+- `trust_center_url`, `notes`, `source_files`: documentation only
+
+### B. Minimal target example
+
+```json
+{
+  "name": "example-app",
+  "repo_url": "https://github.com/org/repo",
+  "repo_commit": "1a2b3c4",
+  "url": "https://example.com",
+  "attestation_url": "https://<app-id>-8090.dstack-pha-prod9.phala.network/"
+}
+```
+
+### C. Quick run (single target)
+
+1. Add the target to `scripts/live_targets.json`.
+2. Run:
+
+```bash
+python scripts/run_live_targets_report.py
+```
+
+3. Open the generated report:
+`case-studies-live-report-YYYY-MM-DD.md`
+
+### D. How to read the report (fast path)
+
+Only four sections are needed for a quick judgment:
+- `Verdict`
+- `Critical Blockers`
+- `Evidence`
+- `Next Step`
+
+If `Run status: failed`, do not trust the rest of that target's output.
+
+### E. Output expectations (for consistency)
+
+The report must:
+- Show `commit resolution log` when checkout fails.
+- Use a short evidence list (<= 4 items per category).
+- Avoid duplicating full build logs in both `Critical Blockers` and `Evidence`.
+- Record live fetch outcomes and errors clearly.
+
+### F. Common errors and user guidance
+
+`commit checkout failed`
+- Means the commit could not be resolved after fetching full history.
+- Check that the commit exists on a remote branch or tag.
+
+`UNEXPECTED_EOF_WHILE_READING`
+- Live endpoint TLS handshake failed.
+- Mark endpoint health and TLS binding as failed or skipped.
+
+`rebuild skipped: no deployed image digest found`
+- The live app_compose omits image digests.
+- Mark reproducibility as unverifiable.
+
+`rebuild digest mismatches`
+- Rebuild succeeded but digest does not match deployed image.
+- Treat reproducibility as failed, ask for pinned builds or reproducible build docs.
+
+### G. Environment prerequisites
+
+Before running:
+- `git` must be available
+- `docker` with `buildx` should be available for reproducibility checks
+- outbound HTTPS access to GitHub and target URLs
+
+If any prerequisite is missing, record it explicitly to avoid false negatives.
+
+### H. Operator gap quick checks
+
+Red flags:
+- Image references like `image: repo:${VAR}@${DIGEST}`
+- Any URL or image selector in `allowed_envs`
+- KMS IDs or key-provider IDs in operator-controlled envs
+
+If any red flag appears, the result is at best `Stage 0` (PARTIAL).
+
+### I. Transparency quick checks
+
+Mark `Upgrade transparency` as PASS only if:
+- Deployments are publicly logged (changelog, on-chain, or trust center history)
+- Image digests are pinned and traceable across releases
+
+Otherwise mark as FAIL with a short explanation.
+
+## Use This Skill Inside Claude (Copy/Paste Workflow)
+
+Claude cannot run local scripts. The easiest workflow is:
+1. Paste the instructions below into Claude.
+2. Provide target info (repo/url/attestation/commit).
+3. Ask Claude to output the exact `live_targets.json` entry and the run command.
+4. Run the command locally and share the report back if you want Claude to interpret it.
+
+### Claude Prompt Template (Minimal)
+
+```text
+You are an audit assistant. Follow the skill rules below exactly and produce actionable steps only.
+
+[PASTE: "User-Friendly Usage (Detailed)" section]
+
+Target info:
+- name: <name>
+- repo_url or repo: <repo>
+- repo_commit: <short or full SHA, if known>
+- url: <live URL>
+- attestation_url: <attestation URL, if known>
+- repo_branch/repo_subdir: <only if needed>
+
+Output:
+1) The exact `live_targets.json` entry
+2) The command to run locally
+3) Which report sections to read first
+```
+
+### Claude Prompt Template (Detailed)
+
+```text
+You are an audit assistant. Use the skill rules below to build a complete audit plan.
+
+[PASTE: "User-Friendly Usage (Detailed)" section]
+
+Target info:
+- name: <name>
+- repo_url or repo: <repo>
+- repo_commit: <short or full SHA, if known>
+- url: <live URL>
+- attestation_url: <attestation URL, if known>
+- repo_branch/repo_subdir: <only if needed>
+- notes/trust_center_url/source_files: <optional>
+
+Tasks:
+1) Provide the minimal valid `live_targets.json` entry
+2) Provide the full entry with optional fields if available
+3) Provide the local run command
+4) Provide a short checklist of how to read the report
+5) Provide troubleshooting steps if `commit checkout failed`
+```
+
+## Agent Mode (Tool-Enabled Clients)
+
+If the client can run local commands and access the network, use the dedicated agent runner.
+
+See `AGENT.md` for the full contract and requirements.
+
+Quick run:
+
+```bash
+python scripts/agent_run.py <<'JSON'
+{ "targets": [ { "name": "example-app", "repo_url": "https://github.com/org/repo", "url": "https://example.com" } ] }
+JSON
+```
 
 ## Verification Checklist (Strict Chain)
 
