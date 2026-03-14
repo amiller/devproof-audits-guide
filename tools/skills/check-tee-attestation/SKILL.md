@@ -1,6 +1,7 @@
 ---
 name: check-tee-attestation
 description: Assess whether a GitHub repository and deployed website are safe to trust under the dstack DevProof model. Use when the user gives a repo, website, app ID, or attestation endpoint and asks whether a TEE app is safe, how strong its attestation and TLS binding are, whether the operator can still rug users, what DevProof stage it reaches, or what evidence is still missing.
+version: 1.0.0
 ---
 
 # Check TEE Attestation
