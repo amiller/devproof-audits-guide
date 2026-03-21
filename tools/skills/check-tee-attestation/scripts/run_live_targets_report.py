@@ -19,6 +19,7 @@ CATEGORY_ORDER = [
     "attestation",
     "endpoint_health",
     "tls_binding",
+    "deployment_traceability",
     "auditability",
     "reproducibility",
     "operator_gap",
@@ -29,6 +30,7 @@ CATEGORY_LABELS = {
     "attestation": "Attestation",
     "endpoint_health": "Application Endpoint Health",
     "tls_binding": "TLS Binding",
+    "deployment_traceability": "Deployment Traceability",
     "auditability": "Repo Auditability",
     "reproducibility": "Reproducibility",
     "operator_gap": "Operator Gap",
@@ -73,6 +75,7 @@ def build_one_glance_from_checks(checks: list[dict]) -> list[dict[str, str]]:
         ("attestation", "Attestation integrity"),
         ("endpoint_health", "Application endpoint health"),
         ("tls_binding", "TLS binding"),
+        ("deployment_traceability", "Repo-to-deployment traceability"),
         ("reproducibility", "Build reproducibility"),
         ("upgrade_transparency", "Upgrade transparency"),
     ]
@@ -362,6 +365,12 @@ def main() -> int:
         lines.append(f"Verdict: {summary.get('verdict', 'Unknown')}")
         lines.append(f"Stage: {summary.get('stage', 'Unknown')}")
         lines.append(f"Score: {summary.get('score', 'Unknown')}/100")
+        triage = summary.get("triage") or {}
+        if triage:
+            lines.append(f"Triage: {str(triage.get('status', 'unknown')).upper()} - {triage.get('verdict', '')}")
+        strong_proof = summary.get("strong_proof") or {}
+        if strong_proof:
+            lines.append(f"Strong proof: {str(strong_proof.get('status', 'unknown')).upper()} - {strong_proof.get('verdict', '')}")
         repo_line = f"Repo: {repo_value}"
         if repo_note:
             repo_line += f" (note: {repo_note})"
@@ -398,7 +407,8 @@ def main() -> int:
             if not check:
                 continue
             label = CATEGORY_LABELS.get(cat, cat)
-            lines.append(f"{label}:")
+            grade = str(check.get("evidence_grade", "unknown")).upper()
+            lines.append(f"{label} ({grade}):")
             evidence = check.get("evidence") or []
             if evidence:
                 for item in evidence[:4]:

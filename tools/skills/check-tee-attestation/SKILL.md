@@ -31,7 +31,11 @@ python scripts/check_tee_attestation.py --repo /path/to/repo --url https://app.e
 ```
 
 3. Read the result as an auditor.
-The script gives a verdict, score, stage estimate, blockers, and evidence. Treat `Stage 1 candidate` as evidence-supported, not as a substitute for full manual review.
+The script now reports two layers:
+- `Initial triage`: fast red-flag detection and evidence collection
+- `Strong-proof checks`: stricter checks that are allowed to influence `Stage 1 candidate`
+
+Treat `Stage 1 candidate` as evidence-supported, not as a substitute for full manual review.
 
 4. Follow up with manual checks when the live target matters.
 Use [references/live-checks.md](./references/live-checks.md) and [references/plan-tee.md](./references/plan-tee.md).
@@ -93,10 +97,12 @@ Checklist:
 3. Attestation presence and integrity
    - 8090 or explicit attestation endpoint responds.
    - Extract `app_compose` and verify `compose_hash`.
+   - Do not treat this alone as strong proof; quote verification is separate.
 
 4. TLS binding
    - Fetch live cert fingerprint.
-   - Compare to attested fingerprint or report_data.
+   - Compare to an exact structured attested fingerprint or an explicitly documented binding.
+   - Do not pass binding on substring matches or generic payload text.
 
 5. Source-to-image linkage
    - Identify deployed image digest from `app_compose`.
@@ -222,6 +228,42 @@ Red flags:
 - KMS IDs or key-provider IDs in operator-controlled envs
 
 If any red flag appears, the result is at best `Stage 0` (PARTIAL).
+
+## Decision Layers
+
+### Layer 1: Initial triage
+
+This layer is allowed to:
+- find likely operator-gap issues
+- find missing evidence
+- find suspicious deployment patterns
+
+This layer is not allowed to:
+- claim hardware attestation is fully verified
+- claim TLS binding is cryptographically proven
+- claim `Stage 1 candidate`
+
+### Layer 2: Strong-proof checks
+
+This layer is required for any `Stage 1 candidate` decision.
+
+Pass strong-proof checks only when:
+- quote verification is explicitly available
+- `compose_hash` matches the fetched `app_compose`
+- `compose_hash` is bound into quote measurements such as `mr_config_id` or `report_data`
+- TLS binding is shown by exact structured evidence
+- reproducibility is shown by pinned digests plus rebuild evidence
+- repo and deployment identity are linked by commit / digest / app ID / compose hash
+- upgrade transparency has both governance controls and a public trail
+
+## Evidence Grades
+
+Each check now carries an evidence grade:
+- `DIRECT`: fetched from live systems or cryptographic artifacts
+- `DERIVED`: inferred from multiple direct facts
+- `HEURISTIC`: pattern-matching or likely-but-incomplete signals
+
+Never treat `HEURISTIC` evidence alone as proof of Stage 1.
 
 ### I. Transparency quick checks
 
@@ -403,6 +445,7 @@ Use [references/report-template.md](./references/report-template.md) for the ful
 Call the app safe under the DevProof model only when all of these are true:
 
 - Live attestation evidence is reachable and coherent.
+- Quote verification is explicitly available from a trusted verifier or equivalent evidence.
 - The website's TLS endpoint is cryptographically bound to attested code, or the trust boundary is clearly limited to an attested gateway.
 - The repo is auditable and the deployment can be connected back to the reviewed source.
 - Reproducibility evidence exists.

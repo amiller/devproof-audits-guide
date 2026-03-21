@@ -23,7 +23,16 @@ TEXT_SUFFIXES = {".env", ".go", ".ini", ".js", ".json", ".jsx", ".py", ".rs", ".
 SOURCE_SUFFIXES = {".go", ".js", ".jsx", ".py", ".rs", ".sol", ".ts", ".tsx"}
 IGNORE_DIRS = {".git", ".next", ".venv", "__pycache__", "build", "dist", "node_modules", "target", "venv"}
 LOCKFILES = {"Cargo.lock", "Gemfile.lock", "package-lock.json", "pnpm-lock.yaml", "poetry.lock", "requirements.lock", "uv.lock", "yarn.lock"}
-WEIGHTS = {"attestation": 20, "tls_binding": 15, "auditability": 15, "reproducibility": 15, "operator_gap": 20, "upgrade_transparency": 10, "code_hygiene": 5}
+WEIGHTS = {
+    "attestation": 20,
+    "tls_binding": 15,
+    "auditability": 10,
+    "reproducibility": 15,
+    "operator_gap": 20,
+    "upgrade_transparency": 10,
+    "deployment_traceability": 10,
+    "code_hygiene": 5,
+}
 STATUS_VALUE = {"pass": 1.0, "warn": 0.5, "fail": 0.0, "skip": 0.25}
 PHALA_HOST_RE = re.compile(r"^([a-f0-9]{40})-(\d+)(s?)\.([a-z0-9-]+)\.phala\.network$", re.IGNORECASE)
 
@@ -32,6 +41,8 @@ PHALA_HOST_RE = re.compile(r"^([a-f0-9]{40})-(\d+)(s?)\.([a-z0-9-]+)\.phala\.net
 class Check:
     category: str
     title: str
+    layer: str
+    evidence_grade: str
     status: str
     summary: str
     evidence: list[str] = field(default_factory=list)
@@ -61,6 +72,10 @@ class RepoFacts:
     binding_hits: list[str] = field(default_factory=list)
     upgrade_hits: list[str] = field(default_factory=list)
     timelock_hits: list[str] = field(default_factory=list)
+    public_upgrade_hits: list[str] = field(default_factory=list)
+    network_call_hits: list[str] = field(default_factory=list)
+    data_flow_hits: list[str] = field(default_factory=list)
+    sensitive_egress_hits: list[str] = field(default_factory=list)
     ci_repro_hits: list[str] = field(default_factory=list)
     hygiene_hits: list[str] = field(default_factory=list)
     rebuild_notes: list[str] = field(default_factory=list)
@@ -88,9 +103,29 @@ class LiveFacts:
     attestation_content_type: str | None = None
     attestation_body: str | None = None
     compose_hash: str | None = None
+    compose_hash_raw: str | None = None
+    compose_hash_canonical: str | None = None
+    compose_hash_algorithm: str | None = None
     computed_compose_hash: str | None = None
     compose_hash_match: bool | None = None
+    quote_present: bool = False
+    quote_measurements_present: bool = False
+    quote_verified: bool | None = None
+    quote_verifier: str | None = None
+    quote_source: str | None = None
+    quote_verification_evidence: list[str] = field(default_factory=list)
+    measurement_bindings: list[str] = field(default_factory=list)
+    measurement_binding_match: bool | None = None
+    measurement_binding_kind: str | None = None
     tls_binding_match: bool | None = None
+    tls_binding_mismatch: bool = False
+    tls_binding_kind: str | None = None
+    tls_boundary_model: str | None = None
+    tls_gateway_attested: bool | None = None
+    resolved_dstack_host: str | None = None
+    cloud_api_url: str | None = None
+    cloud_api_found: bool = False
+    cloud_api_note: str | None = None
     attested_cert_fingerprints: list[str] = field(default_factory=list)
     attestation_components: list[str] = field(default_factory=list)
     app_compose_present: bool = False
@@ -110,6 +145,26 @@ def is_url(value: str | None) -> bool:
 
 def normalize_fingerprint(value: str | None) -> str | None:
     return re.sub(r"[^0-9a-f]", "", value.lower()) if value else None
+
+
+def dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
+
+
+def is_hex_string(value: str | None, min_length: int = 8) -> bool:
+    if not value:
+        return False
+    compact = re.sub(r"[^0-9a-f]", "", value.lower())
+    return len(compact) >= min_length and len(compact) % 2 == 0
+
+
+def normalize_measurement(value: str | None) -> str | None:
+    normalized = normalize_fingerprint(value)
+    return normalized if normalized and len(normalized) >= 32 else None
+
+
+def shorten(value: str, limit: int = 180) -> str:
+    return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
 def fetch_url(url: str) -> tuple[str, dict[str, str], int]:
@@ -160,6 +215,253 @@ def fingerprint_pem_cert(cert_pem: str | None) -> str | None:
         return hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert_pem)).hexdigest()
     except Exception:
         return None
+
+
+def iter_json_nodes(value: object, path: str = ""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            yield child_path, child
+            yield from iter_json_nodes(child, child_path)
+    elif isinstance(value, list):
+        for idx, child in enumerate(value):
+            child_path = f"{path}[{idx}]"
+            yield child_path, child
+            yield from iter_json_nodes(child, child_path)
+
+
+def parse_attestation_signals(payload: dict) -> dict[str, object]:
+    signals: dict[str, object] = {
+        "quote_present": False,
+        "quote_measurements_present": False,
+        "quote_verified": None,
+        "quote_verifier": None,
+        "cert_fingerprints": [],
+    }
+    measurement_re = re.compile(r"^(mr(td|signer|enclave|seam)|mr_config_id|rtmr[0-3]|compose_hash)$", re.IGNORECASE)
+    quote_value_keys = {"quote", "quote_hex", "quotehex", "raw_quote", "td_quote", "tdx_quote", "sgx_quote"}
+    fingerprint_keys = {"certfingerprint", "certificatefingerprint", "tlsfingerprint", "cert_fingerprint", "tls_fingerprint"}
+
+    for path, value in iter_json_nodes(payload):
+        leaf = path.rsplit(".", 1)[-1].lower()
+        context = path.lower()
+        if isinstance(value, str):
+            stripped = value.strip()
+            normalized = normalize_fingerprint(stripped)
+            if leaf in quote_value_keys and len(re.sub(r"[^0-9a-f]", "", stripped.lower())) >= 64:
+                signals["quote_present"] = True
+            if measurement_re.match(leaf) and stripped:
+                signals["quote_measurements_present"] = True
+            if leaf in fingerprint_keys and normalized and len(normalized) == 64:
+                signals["cert_fingerprints"].append(normalized)
+            if leaf in {"verifier", "quote_verifier"} and re.search(r"(quote|attest|verification|dcap|qvl)", context):
+                signals["quote_verifier"] = stripped[:120]
+            if leaf == "status" and re.search(r"(quote|attest|verification|dcap|qvl)", context):
+                lowered = stripped.lower()
+                if lowered in {"verified", "valid", "passed", "pass", "success", "succeeded"}:
+                    signals["quote_verified"] = True
+                elif lowered in {"failed", "invalid", "error", "rejected"}:
+                    signals["quote_verified"] = False
+        elif isinstance(value, bool):
+            if leaf in {"verified", "isverified", "quote_verified", "quoteverified"} and re.search(r"(quote|attest|verification|dcap|qvl)", context):
+                signals["quote_verified"] = value
+
+    signals["cert_fingerprints"] = dedupe(signals["cert_fingerprints"])
+    return signals
+
+
+def apply_attestation_signals(facts: LiveFacts, payload: dict) -> None:
+    signals = parse_attestation_signals(payload)
+    if signals["quote_present"]:
+        facts.quote_present = True
+    if signals["quote_measurements_present"]:
+        facts.quote_measurements_present = True
+    quote_verified = signals["quote_verified"]
+    if quote_verified is False:
+        facts.quote_verified = False
+    elif quote_verified is True and facts.quote_verified is None:
+        facts.quote_verified = True
+    quote_verifier = signals["quote_verifier"]
+    if isinstance(quote_verifier, str) and quote_verifier and not facts.quote_verifier:
+        facts.quote_verifier = quote_verifier
+    cert_fingerprints = signals["cert_fingerprints"]
+    if isinstance(cert_fingerprints, list) and cert_fingerprints:
+        facts.attested_cert_fingerprints = dedupe(facts.attested_cert_fingerprints + [fp for fp in cert_fingerprints if isinstance(fp, str)])
+
+
+def extract_quote_candidates(payload: dict) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    quote_keys = {"quote", "quote_hex", "quotehex", "raw_quote", "td_quote", "tdx_quote", "sgx_quote"}
+    for path, value in iter_json_nodes(payload):
+        if not isinstance(value, str):
+            continue
+        leaf = path.rsplit(".", 1)[-1].lower()
+        compact = re.sub(r"[^0-9a-f]", "", value.lower())
+        if leaf in quote_keys and len(compact) >= 512:
+            candidates.append((path, compact))
+    return candidates
+
+
+def find_measurement_candidates(payload: dict) -> list[tuple[str, str]]:
+    measurement_re = re.compile(r"^(mr_config_id|mrconfigid|report_data|reportdata|rtmr[0-3]|mrtd|mrsigner|mrenclave|compose_hash)$", re.IGNORECASE)
+    matches: list[tuple[str, str]] = []
+    for path, value in iter_json_nodes(payload):
+        if not isinstance(value, str):
+            continue
+        leaf = path.rsplit(".", 1)[-1]
+        if measurement_re.match(leaf):
+            normalized = normalize_measurement(value)
+            if normalized:
+                matches.append((path, normalized))
+    return matches
+
+
+def compute_compose_hashes(app_compose: str) -> dict[str, str] | None:
+    try:
+        compose_obj = json.loads(app_compose)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(compose_obj, dict):
+        return None
+    canonical = json.dumps(compose_obj, separators=(",", ":"), sort_keys=True)
+    return {
+        "raw-string": hashlib.sha256(app_compose.encode("utf-8")).hexdigest(),
+        "canonical-json": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
+
+
+def set_compose_hash_match(facts: LiveFacts, app_compose: str, expected: str | None) -> None:
+    hashes = compute_compose_hashes(app_compose)
+    if not hashes:
+        return
+    facts.compose_hash_raw = hashes["raw-string"]
+    facts.compose_hash_canonical = hashes["canonical-json"]
+    facts.compose_hash = expected
+    if expected == facts.compose_hash_raw:
+        facts.computed_compose_hash = facts.compose_hash_raw
+        facts.compose_hash_algorithm = "raw-string"
+        facts.compose_hash_match = True
+    elif expected == facts.compose_hash_canonical:
+        facts.computed_compose_hash = facts.compose_hash_canonical
+        facts.compose_hash_algorithm = "canonical-json"
+        facts.compose_hash_match = True
+    else:
+        facts.computed_compose_hash = facts.compose_hash_raw
+        facts.compose_hash_algorithm = None
+        facts.compose_hash_match = False if expected else None
+
+
+def classify_tls_boundary(url: str | None, resolved_host: str | None) -> str | None:
+    parsed = urllib.parse.urlparse(url or "")
+    host = parsed.hostname
+    direct = parse_phala_host(host)
+    resolved = parse_phala_host(resolved_host)
+    if direct:
+        return "passthrough-app-cert" if direct["tls_passthrough"] else "gateway-terminated-phala"
+    if resolved:
+        return "custom-domain-to-passthrough" if resolved["tls_passthrough"] else "custom-domain-to-gateway"
+    if host:
+        return "custom-domain-webpki"
+    return None
+
+
+def evaluate_measurement_binding(facts: LiveFacts, payload: dict) -> None:
+    expected_values = [value for value in [facts.compose_hash, facts.compose_hash_raw, facts.compose_hash_canonical] if value]
+    if not expected_values:
+        return
+    for path, value in find_measurement_candidates(payload):
+        for expected in expected_values:
+            if value == expected:
+                facts.measurement_binding_match = True
+                leaf = path.rsplit(".", 1)[-1]
+                facts.measurement_binding_kind = leaf
+                facts.measurement_bindings.append(f"{path} matched {expected}")
+    if facts.measurement_binding_match is not True and find_measurement_candidates(payload):
+        facts.measurement_binding_match = False
+        facts.measurement_bindings.extend([f"{path}: {value}" for path, value in find_measurement_candidates(payload)[:6]])
+
+
+def find_local_quote_verifier() -> tuple[list[str], str] | None:
+    env_cmd = os.environ.get("DSTACK_QUOTE_VERIFY_CMD")
+    if env_cmd:
+        return env_cmd.split(), "env:DSTACK_QUOTE_VERIFY_CMD"
+    candidates = [
+        (["dstack-verifier"], "dstack-verifier"),
+        (["dcap-qvl"], "dcap-qvl"),
+        (["tdx-quote-verify"], "tdx-quote-verify"),
+    ]
+    for cmd, label in candidates:
+        if shutil.which(cmd[0]):
+            return cmd, label
+    return None
+
+
+def verify_quote_with_local_tool(quote_hex: str) -> tuple[bool | None, str]:
+    verifier = find_local_quote_verifier()
+    if not verifier:
+        return None, "no local quote verifier command found"
+    cmd, label = verifier
+    quote_file = tempfile.NamedTemporaryFile(delete=False, suffix=".hex")
+    quote_file.write(quote_hex.encode("utf-8"))
+    quote_file.close()
+    attempts = [
+        cmd + [quote_file.name],
+        cmd + ["verify", quote_file.name],
+        cmd + ["--quote", quote_file.name],
+        cmd + ["verify", "--quote", quote_file.name],
+    ]
+    try:
+        for attempt in attempts:
+            result = subprocess.run(attempt, capture_output=True, text=True, check=False, timeout=40)
+            output = (result.stdout or "") + "\n" + (result.stderr or "")
+            lowered = output.lower()
+            if result.returncode == 0 and any(token in lowered for token in ("success", "verified", "valid", "pass")):
+                return True, f"{label}: {shorten(output.strip() or 'verified')}"
+            if result.returncode != 0 and any(token in lowered for token in ("usage", "unknown option", "invalid option", "too few arguments")):
+                continue
+            if result.returncode == 0:
+                return True, f"{label}: exited 0"
+            return False, f"{label}: {shorten(output.strip() or 'verification failed')}"
+        return None, f"{label}: no supported CLI invocation detected"
+    finally:
+        os.unlink(quote_file.name)
+
+
+def analyze_repo_data_flow(root: Path, files: list[Path], limit: int = 10) -> tuple[list[str], list[str], list[str]]:
+    network_hits: list[str] = []
+    data_flow_hits: list[str] = []
+    sensitive_egress_hits: list[str] = []
+    network_re = re.compile(r"\b(fetch|axios|httpx|requests\.(get|post|put|patch|delete)|aiohttp|urllib\.request|client\.(get|post)|https?\.)", re.IGNORECASE)
+    user_data_re = re.compile(r"\b(prompt|message|messages|request\.body|user_input|chat_request|chat_completion|conversation|content|private_key|key_material)\b", re.IGNORECASE)
+    configurable_re = re.compile(r"\b(base_url|api_url|endpoint|rpc_url|server_url|model_discovery_server_url|openai_base_url|process\.env|os\.getenv|getenv|\$\{[A-Z0-9_]+\})", re.IGNORECASE)
+    for path in files:
+        lowered_name = path.name.lower()
+        if any(token in lowered_name for token in ("report", "notes", "reproduction", "query-compose-hashes")):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        lines = text.splitlines()
+        has_network = False
+        has_user_data = False
+        has_configurable = False
+        for lineno, line in enumerate(lines, start=1):
+            if network_re.search(line):
+                has_network = True
+                if len(network_hits) < limit:
+                    network_hits.append(f"{relpath(path, root)}:{lineno}: {line.strip()[:180]}")
+            if user_data_re.search(line):
+                has_user_data = True
+            if configurable_re.search(line):
+                has_configurable = True
+            if network_re.search(line) and user_data_re.search(line) and len(data_flow_hits) < limit:
+                data_flow_hits.append(f"{relpath(path, root)}:{lineno}: {line.strip()[:180]}")
+            if network_re.search(line) and configurable_re.search(line) and len(sensitive_egress_hits) < limit:
+                sensitive_egress_hits.append(f"{relpath(path, root)}:{lineno}: {line.strip()[:180]}")
+        if has_network and has_user_data and has_configurable and len(sensitive_egress_hits) < limit:
+            sensitive_egress_hits.append(f"{relpath(path, root)}: network calls, user data symbols, and configurable endpoints coexist in the same file")
+    return dedupe(network_hits), dedupe(data_flow_hits), dedupe(sensitive_egress_hits)
 
 
 def extract_attestation_candidates(payload: dict, prefix: str = "") -> list[tuple[str, dict, str | None]]:
@@ -225,14 +527,8 @@ def analyze_app_compose(facts: LiveFacts, app_compose: str, component: str) -> N
 
 
 def compute_compose_hash(app_compose: str) -> str | None:
-    try:
-        compose_obj = json.loads(app_compose)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(compose_obj, dict):
-        return None
-    canonical = json.dumps(compose_obj, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    hashes = compute_compose_hashes(app_compose)
+    return hashes["raw-string"] if hashes else None
 
 
 def relpath(path: Path, root: Path) -> str:
@@ -297,6 +593,11 @@ def collect_repo(repo_root: Path, target: str) -> RepoFacts:
     dockerfiles = [p for p in files if p.name.startswith("Dockerfile") or p.name == "Containerfile"]
     workflows = [p for p in files if ".github/workflows/" in relpath(p, repo_root)]
     source_files = [p for p in files if p.suffix.lower() in SOURCE_SUFFIXES]
+    public_upgrade_files = [
+        relpath(p, repo_root)
+        for p in files
+        if p.name in {"CHANGELOG.md", "CHANGELOG", "DEPLOYMENTS.md", "RELEASES.md", "UPGRADES.md"}
+    ][:20]
     facts = RepoFacts(
         root=str(repo_root),
         target=target,
@@ -353,6 +654,8 @@ def collect_repo(repo_root: Path, target: str) -> RepoFacts:
     facts.binding_hits = grep(repo_root, files, [r"report_data", r"tlsfingerprint|fingerprint", r"sha256"], 12)
     facts.upgrade_hits = grep(repo_root, files, [r"AppAuth|DstackApp|isAppAllowed|addComposeHash|ComposeHashAdded|basescan|kms-base"], 10)
     facts.timelock_hits = grep(repo_root, files, [r"timelock|notice period|disableUpgrades"], 10)
+    facts.public_upgrade_hits = public_upgrade_files + grep(repo_root, files, [r"\b(changelog|release history|deployment history|upgrade history|trust center|basescan|etherscan)\b"], 10)
+    facts.network_call_hits, facts.data_flow_hits, facts.sensitive_egress_hits = analyze_repo_data_flow(repo_root, source_files)
     facts.ci_repro_hits = grep(repo_root, workflows + dockerfiles, [r"SOURCE_DATE_EPOCH|rewrite-timestamp|buildx"], 10)
     facts.hygiene_hits = grep(repo_root, files, [r"debug\s*=\s*True", r"verify\s*=\s*False", r"break.?glass|admin", r"log.*(token|secret|password|private key)", r"known issue|fallback|mock"], 12)
     return facts
@@ -589,6 +892,17 @@ def parse_phala_host(host: str | None) -> dict | None:
     }
 
 
+def looks_like_attestation_url(url: str | None) -> bool:
+    if not url:
+        return False
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.rstrip("/").lower() or "/"
+    parsed_host = parse_phala_host(parsed.hostname)
+    if parsed_host and parsed_host["port"] == 8090:
+        return True
+    return path in {"/attestation", "/attestation/report", "/v1/attestation/report", "/.well-known/attestation", "/quote"}
+
+
 def resolve_dstack_app(domain: str) -> str | None:
     txt_host = f"_dstack-app-address.{domain}"
     pattern = PHALA_HOST_RE
@@ -607,6 +921,20 @@ def resolve_dstack_app(domain: str) -> str | None:
             if match:
                 return match.group(0)
     return None
+
+
+def fetch_cloud_attestation(app_id: str | None) -> tuple[dict | None, str | None, str | None]:
+    if not app_id:
+        return None, None, None
+    url = f"https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations"
+    try:
+        body, _, _ = fetch_url(url)
+        payload = json.loads(body)
+        if isinstance(payload, dict):
+            return payload, url, None
+        return None, url, "cloud API returned non-object JSON"
+    except Exception as exc:
+        return None, url, str(exc)
 
 
 def collect_live(url: str | None, attestation_url: str | None, app_id: str | None, cluster_domain: str | None) -> LiveFacts:
@@ -663,10 +991,20 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
                 resolved_app_id = parsed_host["app_id"]
                 resolved_cluster = parsed_host["cluster"]
                 facts.notes.append(f"resolved _dstack-app-address to {resolved_host}")
+                facts.resolved_dstack_host = resolved_host
     if resolved_app_id:
         facts.app_id = resolved_app_id
     if resolved_cluster:
         facts.cluster_domain = resolved_cluster
+    if not facts.resolved_dstack_host and match:
+        facts.resolved_dstack_host = match.group(0)
+    facts.tls_boundary_model = classify_tls_boundary(url, facts.resolved_dstack_host)
+    if facts.tls_boundary_model == "passthrough-app-cert":
+        facts.tls_gateway_attested = False
+    elif facts.tls_boundary_model in {"gateway-terminated-phala", "custom-domain-to-gateway"}:
+        facts.tls_gateway_attested = True
+    else:
+        facts.tls_gateway_attested = None
     def cluster_host(value: str) -> str:
         return value if value.endswith(".phala.network") else f"{value}.phala.network"
 
@@ -674,13 +1012,14 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
     if attestation_url:
         candidates.append(attestation_url)
     else:
-        if url:
+        if looks_like_attestation_url(url):
             candidates.append(url)
         if resolved_app_id and resolved_cluster:
             candidates.append(f"https://{resolved_app_id}-8090.{cluster_host(resolved_cluster)}/")
         if match:
             candidates.append(f"https://{match.group(1)}-8090.{cluster_host(match.group(4))}/")
-        candidates.extend([url.rstrip("/") + suffix for suffix in ["/attestation", "/attestation/report", "/v1/attestation/report", "/.well-known/attestation", "/quote"]])
+        if url:
+            candidates.extend([url.rstrip("/") + suffix for suffix in ["/attestation", "/attestation/report", "/v1/attestation/report", "/.well-known/attestation", "/quote"]])
     seen: set[str] = set()
     cert_norm = normalize_fingerprint(facts.cert_fingerprint)
     for candidate in candidates:
@@ -703,14 +1042,26 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
             tcb = extract_tcb_info(body)
             if tcb:
                 tcb_info = tcb.get("tcb_info") if isinstance(tcb.get("tcb_info"), dict) else tcb
+                if isinstance(tcb_info, dict):
+                    apply_attestation_signals(facts, tcb_info)
                 app_compose = tcb_info.get("app_compose") if isinstance(tcb_info, dict) else None
                 if isinstance(app_compose, str):
-                    facts.compose_hash = tcb_info.get("compose_hash") if isinstance(tcb_info, dict) else None
-                    facts.computed_compose_hash = compute_compose_hash(app_compose)
-                    facts.compose_hash_match = facts.compose_hash == facts.computed_compose_hash if facts.compose_hash else None
-                    if cert_norm and cert_norm in normalize_fingerprint(app_compose):
-                        facts.tls_binding_match = True
+                    set_compose_hash_match(facts, app_compose, tcb_info.get("compose_hash") if isinstance(tcb_info, dict) else None)
                     analyze_app_compose(facts, app_compose, "tcb_info")
+                    if cert_norm and cert_norm in facts.attested_cert_fingerprints:
+                        facts.tls_binding_match = True
+                        facts.tls_binding_kind = "attested cert fingerprint"
+                if isinstance(tcb_info, dict):
+                    evaluate_measurement_binding(facts, tcb_info)
+                    quote_candidates = extract_quote_candidates(tcb_info)
+                    if quote_candidates and not facts.quote_source:
+                        facts.quote_source = quote_candidates[0][0]
+                    if quote_candidates and facts.quote_verified is None:
+                        verified, note = verify_quote_with_local_tool(quote_candidates[0][1])
+                        facts.quote_verified = verified if verified is not None else facts.quote_verified
+                        facts.quote_verification_evidence.append(note)
+                        if verified is not None and not facts.quote_verifier:
+                            facts.quote_verifier = note.split(":", 1)[0]
                     break
         else:
             try:
@@ -718,34 +1069,77 @@ def collect_live(url: str | None, attestation_url: str | None, app_id: str | Non
             except json.JSONDecodeError:
                 payload = None
             if isinstance(payload, dict):
+                apply_attestation_signals(facts, payload)
                 candidates = extract_attestation_candidates(payload)
                 if candidates:
                     facts.attestation_components = [name for name, _, _ in candidates]
+                    evaluate_measurement_binding(facts, payload)
+                    quote_candidates = extract_quote_candidates(payload)
+                    if quote_candidates and not facts.quote_source:
+                        facts.quote_source = quote_candidates[0][0]
+                    if quote_candidates and facts.quote_verified is None:
+                        verified, note = verify_quote_with_local_tool(quote_candidates[0][1])
+                        facts.quote_verified = verified if verified is not None else facts.quote_verified
+                        facts.quote_verification_evidence.append(note)
+                        if verified is not None and not facts.quote_verifier:
+                            facts.quote_verifier = note.split(":", 1)[0]
                     for name, tcb, cert_pem in candidates:
+                        apply_attestation_signals(facts, tcb)
                         if facts.compose_hash_match is not True and isinstance(tcb.get("app_compose"), str):
-                            facts.compose_hash = tcb.get("compose_hash")
-                            facts.computed_compose_hash = hashlib.sha256(tcb["app_compose"].encode("utf-8")).hexdigest()
-                            facts.compose_hash_match = facts.compose_hash == facts.computed_compose_hash if facts.compose_hash else None
+                            set_compose_hash_match(facts, tcb["app_compose"], tcb.get("compose_hash"))
                             if facts.compose_hash_match:
                                 facts.notes.append(f"compose hash matched for {name}")
                             analyze_app_compose(facts, tcb["app_compose"], name)
+                        evaluate_measurement_binding(facts, tcb)
                         cert_fp = fingerprint_pem_cert(cert_pem)
                         if cert_fp:
                             facts.attested_cert_fingerprints.append(cert_fp)
                             if cert_norm and cert_fp == cert_norm:
                                 facts.tls_binding_match = True
+                                facts.tls_binding_kind = "attested cert fingerprint"
                     if facts.attested_cert_fingerprints and cert_norm and facts.tls_binding_match is not True:
                         facts.notes.append("attested cert does not match site TLS certificate")
+                        facts.tls_binding_mismatch = True
                     break
-                payload_text = json.dumps(payload, sort_keys=True)
-                if cert_norm and cert_norm in normalize_fingerprint(payload_text):
-                    facts.tls_binding_match = True
                 break
+    facts.attested_cert_fingerprints = dedupe(facts.attested_cert_fingerprints)
+    if facts.attested_cert_fingerprints and cert_norm and facts.tls_binding_match is not True:
+        facts.tls_binding_mismatch = True
+    cloud_payload, cloud_url, cloud_error = fetch_cloud_attestation(facts.app_id)
+    facts.cloud_api_url = cloud_url
+    if cloud_payload:
+        facts.cloud_api_found = True
+        apply_attestation_signals(facts, cloud_payload)
+        evaluate_measurement_binding(facts, cloud_payload)
+        if facts.quote_verified is None:
+            quote_candidates = extract_quote_candidates(cloud_payload)
+            if quote_candidates:
+                facts.quote_source = facts.quote_source or f"cloud-api:{quote_candidates[0][0]}"
+                verified, note = verify_quote_with_local_tool(quote_candidates[0][1])
+                facts.quote_verified = verified if verified is not None else facts.quote_verified
+                facts.quote_verification_evidence.append(note)
+                if verified is not None and not facts.quote_verifier:
+                    facts.quote_verifier = note.split(":", 1)[0]
+    elif cloud_error:
+        facts.cloud_api_note = cloud_error
+        facts.notes.append(f"cloud API attestation fetch failed: {cloud_error}")
     return facts
 
 
-def add_check(checks: list[Check], category: str, title: str, status: str, summary: str, evidence: list[str], recommendation: str) -> None:
-    checks.append(Check(category, title, status, summary, evidence[:8], recommendation))
+def infer_evidence_grade(category: str, layer: str, status: str, evidence_grade: str | None) -> str:
+    if evidence_grade:
+        return evidence_grade
+    if category in {"attestation_surface", "attestation", "endpoint_health", "tls_binding"}:
+        return "direct"
+    if category in {"reproducibility", "operator_gap", "upgrade_transparency", "deployment_traceability"}:
+        return "derived"
+    if layer == "strong" and status == "pass":
+        return "derived"
+    return "heuristic"
+
+
+def add_check(checks: list[Check], category: str, title: str, layer: str, status: str, summary: str, evidence: list[str], recommendation: str, evidence_grade: str | None = None) -> None:
+    checks.append(Check(category, title, layer, infer_evidence_grade(category, layer, status, evidence_grade), status, summary, evidence[:8], recommendation))
 
 
 def merge_status(*values: str) -> str:
@@ -764,7 +1158,7 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
         if repo.remote_url:
             audit_evidence.insert(0, f"remote: {repo.remote_url}")
         audit_status = "pass" if repo.source_file_count >= 20 and (repo.remote_url or repo.compose_files or repo.dockerfiles) else "warn" if repo.source_file_count >= 5 or repo.compose_files or repo.dockerfiles else "fail"
-        add_check(checks, "auditability", "Repo auditability", audit_status, "The repo is auditable." if audit_status == "pass" else "Only partial deployable source is visible." if audit_status == "warn" else "The repo does not look like a deployable audit artifact.", audit_evidence, "Expose the exact deployable source or artifact path.")
+        add_check(checks, "auditability", "Repo auditability", "triage", audit_status, "The repo is auditable enough for an initial review." if audit_status == "pass" else "Only partial deployable source is visible." if audit_status == "warn" else "The repo does not look like a deployable audit artifact.", audit_evidence, "Expose the exact deployable source or artifact path.")
         repro_evidence = repo.pinned_bases + repo.pinned_images + repo.ci_repro_hits + repo.variable_images + [f"lockfiles: {', '.join(repo.lockfiles[:4]) or 'none'}"]
         repro_status = "pass" if (repo.pinned_bases or repo.pinned_images) and repo.lockfiles and repo.ci_repro_hits and not repo.variable_images else "fail" if repo.variable_images or not (repo.pinned_bases or repo.pinned_images) else "warn"
         repro_summary = "The repo shows reproducibility evidence." if repro_status == "pass" else "Mutable image refs or missing digest pinning block reproducibility." if repro_status == "fail" else "Some reproducibility signals exist, but they are incomplete."
@@ -798,13 +1192,25 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
                         repro_evidence.insert(0, f"rebuild failure: {reason}")
             else:
                 note = ", ".join(rebuild_notes) if rebuild_notes else "rebuild did not run"
-                repro_status = "fail"
-                repro_summary = f"Rebuild verification required but skipped: {note}."
+                lowered_note = note.lower()
+                if "no deployed image digest found" in lowered_note or "reproducibility not verifiable" in lowered_note:
+                    repro_status = "warn" if repro_status != "fail" else "fail"
+                    repro_summary = f"Reproducibility is not fully verifiable from live deployment evidence: {note}."
+                elif "no dockerfile or compose build targets found" in lowered_note:
+                    repro_status = "warn" if repro_status != "fail" else "fail"
+                    repro_summary = f"Reproducibility is only partially verifiable because no local build target was found: {note}."
+                elif repro_status == "pass":
+                    repro_status = "warn"
+                    repro_summary = f"Static reproducibility signals look good, but rebuild verification did not complete: {note}."
+                elif repro_status == "warn":
+                    repro_summary = f"Rebuild verification did not complete: {note}."
+                else:
+                    repro_summary = f"Reproducibility already had blockers, and rebuild verification did not complete: {note}."
                 if rebuild_notes:
                     repro_evidence.insert(0, f"rebuild skipped: {note}")
-        add_check(checks, "reproducibility", "Reproducibility", repro_status, repro_summary, repro_evidence, "Pin bases and images by digest, then document hash reproduction.")
-        operator_status_repo = "fail" if repo.variable_images or repo.configurable_url_hits or repo.key_material_hits else "warn" if repo.allowed_env_hits or repo.infra_secret_hits else "pass"
-        operator_evidence = repo.variable_images + repo.configurable_url_hits + repo.key_material_hits + repo.allowed_env_hits + repo.infra_secret_hits
+        add_check(checks, "reproducibility", "Reproducibility", "strong", repro_status, repro_summary, repro_evidence, "Pin bases and images by digest, then document hash reproduction.")
+        operator_status_repo = "fail" if repo.variable_images or repo.configurable_url_hits or repo.key_material_hits or repo.sensitive_egress_hits else "warn" if repo.allowed_env_hits or repo.infra_secret_hits or repo.data_flow_hits else "pass"
+        operator_evidence = repo.variable_images + repo.configurable_url_hits + repo.key_material_hits + repo.allowed_env_hits + repo.infra_secret_hits + repo.sensitive_egress_hits[:6] + repo.data_flow_hits[:4]
         if repo.source_file_count == 0 and not repo.compose_files and not repo.dockerfiles:
             operator_status_repo = "skip"
             operator_evidence.insert(0, "source files: 0 (insufficient source to assess operator gap)")
@@ -829,58 +1235,225 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
             if live.pre_launch_script_present:
                 operator_evidence.append("pre_launch_script present in live app_compose")
         if operator_status_repo == "skip" and operator_status_live in ("pass", "skip"):
-            operator_status = "skip"
+            operator_triage_status = "skip"
         else:
-            operator_status = merge_status(operator_status_repo, operator_status_live)
-        operator_summary = (
+            operator_triage_status = merge_status(operator_status_repo, operator_status_live)
+        operator_triage_summary = (
             "The operator still appears able to steer code, routing, or key material."
-            if operator_status == "fail"
+            if operator_triage_status == "fail"
             else "There are signs that mutable runtime configuration still matters."
-            if operator_status == "warn"
+            if operator_triage_status == "warn"
             else "Insufficient source to assess operator-controlled gaps."
-            if operator_status == "skip"
+            if operator_triage_status == "skip"
             else "No obvious operator-controlled URL, image, or key gap was found."
         )
-        add_check(checks, "operator_gap", "Operator gap", operator_status, operator_summary, operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
+        add_check(checks, "operator_gap_triage", "Operator gap red flags", "triage", operator_triage_status, operator_triage_summary, operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
+        if operator_triage_status == "fail":
+            operator_status = "fail"
+            operator_summary = "The live or audited config still leaves a real operator-controlled gap."
+        elif live and live.app_compose_present and repo.source_file_count > 0 and not live.pre_launch_script_present and not repo.allowed_env_hits and not repo.infra_secret_hits and not repo.sensitive_egress_hits:
+            operator_status = "pass"
+            operator_summary = "Live compose data plus repo data-flow review do not show an operator-controlled steering channel."
+        elif live or repo.source_file_count > 0:
+            operator_status = "warn"
+            operator_summary = "No hard operator-gap failure was found, but the evidence is not complete enough to close the gap strongly."
+        else:
+            operator_status = "skip"
+            operator_summary = "Operator-gap proof could not be established from the available evidence."
+        add_check(checks, "operator_gap", "Operator gap", "strong", operator_status, operator_summary, operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
+        attestation_surface_evidence = repo.attestation_hits + repo.binding_hits
+        if live and live.attestation_url:
+            attestation_surface_evidence.insert(0, f"attestation endpoint: {live.attestation_url}")
+        if live and live.cloud_api_url:
+            attestation_surface_evidence.insert(1, f"cloud API: {live.cloud_api_url}")
+        if live and live.compose_hash:
+            attestation_surface_evidence.insert(2, f"compose hash: {live.compose_hash}")
+        if live and live.compose_hash_algorithm:
+            attestation_surface_evidence.insert(3, f"compose hash algorithm: {live.compose_hash_algorithm}")
+        if live and live.attestation_components:
+            attestation_surface_evidence.insert(4, f"components: {', '.join(live.attestation_components[:4])}")
+        if live:
+            if not live.reachable:
+                attestation_surface_status = "skip"
+            elif live.attestation_found and live.app_compose_present and live.compose_hash_match:
+                attestation_surface_status = "pass"
+            elif live.attestation_found:
+                attestation_surface_status = "warn"
+            else:
+                attestation_surface_status = "fail"
+        elif repo.attestation_hits and repo.binding_hits:
+            attestation_surface_status = "warn"
+        else:
+            attestation_surface_status = "skip"
+        attestation_surface_summary = (
+            "A live attestation surface was found and its compose metadata is internally coherent."
+            if attestation_surface_status == "pass"
+            else "An attestation surface exists, but it is only partial or not fully coherent."
+            if attestation_surface_status == "warn"
+            else "Live target unavailable or no live URL provided; attestation surface not verifiable."
+            if attestation_surface_status == "skip"
+            else "No convincing attestation surface was found."
+        )
+        if live and live.notes and not live.attestation_found:
+            attestation_surface_evidence.extend([f"live note: {note}" for note in live.notes[:3]])
+        add_check(checks, "attestation_surface", "Attestation surface", "triage", attestation_surface_status, attestation_surface_summary, attestation_surface_evidence, "Expose a public attestation path or 8090 metadata for third-party verification.")
         if live:
             if not live.reachable:
                 attestation_status = "skip"
-            elif live.attestation_found:
-                attestation_status = "pass" if live.compose_hash_match else "warn"
-            else:
+            elif not live.attestation_found:
                 attestation_status = "fail"
+            elif live.quote_verified is False or live.measurement_binding_match is False:
+                attestation_status = "fail"
+            elif live.compose_hash_match and live.quote_present and live.quote_measurements_present and live.quote_verified is True and live.measurement_binding_match is True:
+                attestation_status = "pass"
+            else:
+                attestation_status = "warn"
         elif repo.attestation_hits and repo.binding_hits:
             attestation_status = "warn"
         else:
             attestation_status = "skip"
         attestation_summary = (
-            "Live attestation evidence is reachable and coherent."
+            "Attestation proof is strong: quote verification, compose hash, and measurement binding all line up."
             if attestation_status == "pass"
-            else "The repo contains attestation logic, but live verification is partial."
+            else "Attestation evidence exists, but the hardware-proof chain is incomplete."
             if attestation_status == "warn"
             else "Live target unavailable or no live URL provided; attestation not verifiable."
             if attestation_status == "skip"
-            else "No convincing attestation path was found."
+            else "Attestation proof failed or no convincing attestation path was found."
         )
         attestation_evidence = repo.attestation_hits + repo.binding_hits
         if live and live.attestation_url:
             attestation_evidence.insert(0, f"attestation endpoint: {live.attestation_url}")
         if live and live.compose_hash:
             attestation_evidence.insert(1, f"compose hash: {live.compose_hash}")
+        if live and live.compose_hash_algorithm:
+            attestation_evidence.insert(2, f"compose hash algorithm: {live.compose_hash_algorithm}")
         if live and live.attestation_components:
-            attestation_evidence.insert(2, f"components: {', '.join(live.attestation_components[:4])}")
-        if live and live.notes and not live.attestation_found:
+            attestation_evidence.insert(3, f"components: {', '.join(live.attestation_components[:4])}")
+        if live:
+            attestation_evidence.append(f"quote present: {'yes' if live.quote_present else 'no'}")
+            attestation_evidence.append(f"quote measurements present: {'yes' if live.quote_measurements_present else 'no'}")
+            attestation_evidence.append(f"quote verified: {live.quote_verified if live.quote_verified is not None else 'unverified'}")
+            attestation_evidence.append(f"quote source: {live.quote_source or 'unverified'}")
+            attestation_evidence.append(f"measurement binding: {live.measurement_binding_match if live.measurement_binding_match is not None else 'unverified'}")
+            if live.measurement_binding_kind:
+                attestation_evidence.append(f"measurement binding kind: {live.measurement_binding_kind}")
+            attestation_evidence.extend(live.measurement_bindings[:3])
+            if live.quote_verifier:
+                attestation_evidence.append(f"quote verifier: {live.quote_verifier}")
+            attestation_evidence.extend(live.quote_verification_evidence[:3])
+        if live and live.notes and attestation_status != "pass":
             attestation_evidence.extend([f"live note: {note}" for note in live.notes[:3]])
-            summary_note = "; ".join(live.notes[:2])
-            attestation_summary = f"{attestation_summary} (parse/fetch issues: {summary_note})"
-        add_check(checks, "attestation", "Attestation", attestation_status, attestation_summary, attestation_evidence, "Expose a public attestation path or 8090 metadata for third-party verification.")
-        upgrade_status = "pass" if repo.timelock_hits else "warn" if repo.upgrade_hits else "fail"
-        add_check(checks, "upgrade_transparency", "Upgrade transparency", upgrade_status, "Timelock or upgrade-locking logic is visible." if upgrade_status == "pass" else "There is some upgrade machinery, but no clear notice period." if upgrade_status == "warn" else "No convincing public upgrade trail was found.", repo.timelock_hits + repo.upgrade_hits, "Use AppAuth or equivalent public upgrade authorization, and prefer timelocks.")
+        add_check(checks, "attestation", "Attestation", "strong", attestation_status, attestation_summary, attestation_evidence, "Require quote verification plus a compose-hash-to-measurement binding before treating attestation as strong proof.")
+        upgrade_clues_status = "pass" if repo.timelock_hits or repo.public_upgrade_hits or repo.upgrade_hits else "fail"
+        upgrade_clues_summary = "The repo exposes upgrade transparency clues." if upgrade_clues_status == "pass" else "No obvious public upgrade trail was found in the repo."
+        upgrade_evidence = repo.timelock_hits + repo.public_upgrade_hits + repo.upgrade_hits
+        add_check(checks, "upgrade_transparency_clues", "Upgrade transparency clues", "triage", upgrade_clues_status, upgrade_clues_summary, upgrade_evidence, "Publish changelogs, deployment history, and upgrade authorization artifacts.")
+        upgrade_status = "pass" if repo.timelock_hits and repo.public_upgrade_hits and repo.upgrade_hits else "warn" if repo.timelock_hits or repo.public_upgrade_hits or repo.upgrade_hits else "fail"
+        add_check(checks, "upgrade_transparency", "Upgrade transparency", "strong", upgrade_status, "Timelock plus public upgrade history are both visible." if upgrade_status == "pass" else "Some upgrade governance signals exist, but the public trail is incomplete." if upgrade_status == "warn" else "No convincing public upgrade trail was found.", upgrade_evidence, "Use AppAuth or equivalent public upgrade authorization, publish release history, and prefer timelocks.")
+        traceability_evidence = []
+        if repo.remote_url:
+            traceability_evidence.append(f"repo remote: {repo.remote_url}")
+        if repo.git_head:
+            traceability_evidence.append(f"repo git head: {repo.git_head}")
+        if live and live.app_id:
+            traceability_evidence.append(f"app id: {live.app_id}")
+        if live and live.attestation_url:
+            traceability_evidence.append(f"attestation endpoint: {live.attestation_url}")
+        if live and live.compose_hash:
+            traceability_evidence.append(f"compose hash: {live.compose_hash}")
+        deployed_digests = parse_image_digests(live.docker_compose_images_pinned) if live else []
+        if deployed_digests:
+            traceability_evidence.append(f"deployed digests: {', '.join(deployed_digests[:4])}")
+        traceability_status = "pass" if live and repo.git_head and live.app_id and live.attestation_found and (deployed_digests or live.compose_hash_match) and repro_status == "pass" else "warn" if live and repo.git_head and (live.attestation_found or live.compose_hash or deployed_digests) else "skip" if not live else "fail"
+        traceability_summary = "Repo identity, deployment identity, and live evidence can be linked." if traceability_status == "pass" else "Some repo-to-deployment evidence exists, but the chain is not closed strongly." if traceability_status == "warn" else "Repo-to-deployment traceability is not verifiable from the available inputs." if traceability_status == "skip" else "The repo and live deployment could not be linked convincingly."
+        add_check(checks, "deployment_traceability", "Deployment traceability", "strong", traceability_status, traceability_summary, traceability_evidence, "Record the exact source commit, deployed image digest, compose hash, and app ID in one public trail.")
         hygiene_status = "fail" if len(repo.hygiene_hits) >= 4 else "warn" if repo.hygiene_hits else "pass"
-        add_check(checks, "code_hygiene", "Code hygiene", hygiene_status, "Debug, fallback, or insecure verification patterns need review." if hygiene_status != "pass" else "No obvious debug or insecure fallback strings were found.", repo.hygiene_hits, "Remove production fallbacks and log-sensitive paths.")
+        add_check(checks, "code_hygiene", "Code hygiene", "triage", hygiene_status, "Debug, fallback, or insecure verification patterns need review." if hygiene_status != "pass" else "No obvious debug or insecure fallback strings were found.", repo.hygiene_hits, "Remove production fallbacks and log-sensitive paths.")
     else:
-        for category, title in [("auditability", "Repo auditability"), ("reproducibility", "Reproducibility"), ("operator_gap", "Operator gap"), ("attestation", "Attestation"), ("upgrade_transparency", "Upgrade transparency"), ("code_hygiene", "Code hygiene")]:
-            add_check(checks, category, title, "skip", "No repo was provided.", [], "Provide a repo path or GitHub URL.")
+        add_check(checks, "auditability", "Repo auditability", "triage", "skip", "No repo was provided.", [], "Provide a repo path or GitHub URL.")
+        add_check(checks, "reproducibility", "Reproducibility", "strong", "skip", "No repo was provided.", [], "Provide a repo path or GitHub URL.")
+        add_check(checks, "upgrade_transparency_clues", "Upgrade transparency clues", "triage", "skip", "No repo was provided.", [], "Provide a repo path or GitHub URL.")
+        add_check(checks, "upgrade_transparency", "Upgrade transparency", "strong", "skip", "No repo was provided.", [], "Provide a repo path or GitHub URL.")
+        add_check(checks, "code_hygiene", "Code hygiene", "triage", "skip", "No repo was provided.", [], "Provide a repo path or GitHub URL.")
+        operator_evidence: list[str] = []
+        if live:
+            live_fail = bool(live.docker_compose_images_variable or live.allowed_envs_url or live.allowed_envs_image or live.allowed_envs_secret)
+            live_warn = bool(live.allowed_envs or live.pre_launch_script_present)
+            if live.docker_compose_images_variable:
+                operator_evidence.extend(live.docker_compose_images_variable[:4])
+            if live.allowed_envs_url:
+                operator_evidence.append(f"allowed_envs (URL): {', '.join(live.allowed_envs_url[:6])}")
+            if live.allowed_envs_image:
+                operator_evidence.append(f"allowed_envs (IMAGE): {', '.join(live.allowed_envs_image[:6])}")
+            if live.allowed_envs_secret:
+                operator_evidence.append(f"allowed_envs (SECRET): {', '.join(live.allowed_envs_secret[:6])}")
+            if live.pre_launch_script_present:
+                operator_evidence.append("pre_launch_script present in live app_compose")
+            operator_triage_status = "fail" if live_fail else "warn" if live_warn else "pass"
+            operator_triage_summary = "The operator still appears able to steer code, routing, or key material." if operator_triage_status == "fail" else "There are signs that mutable runtime configuration still matters." if operator_triage_status == "warn" else "No obvious operator-controlled URL, image, or key gap was found in live metadata."
+            operator_status = "fail" if live_fail else "warn" if live_warn or not live.app_compose_present else "pass"
+            operator_summary = "The live config still leaves a real operator-controlled gap." if operator_status == "fail" else "Live metadata does not prove the operator gap is closed." if operator_status == "warn" else "Live compose metadata does not show an operator-controlled steering channel."
+        else:
+            operator_triage_status = "skip"
+            operator_triage_summary = "No repo or live target was provided."
+            operator_status = "skip"
+            operator_summary = "No repo or live target was provided."
+        add_check(checks, "operator_gap_triage", "Operator gap red flags", "triage", operator_triage_status, operator_triage_summary, operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
+        add_check(checks, "operator_gap", "Operator gap", "strong", operator_status, operator_summary, operator_evidence, "Keep URLs, image digests, signing keys, and security-sensitive config out of mutable runtime inputs.")
+        attestation_surface_evidence: list[str] = []
+        if live and live.attestation_url:
+            attestation_surface_evidence.append(f"attestation endpoint: {live.attestation_url}")
+        if live and live.cloud_api_url:
+            attestation_surface_evidence.append(f"cloud API: {live.cloud_api_url}")
+        if live and live.compose_hash:
+            attestation_surface_evidence.append(f"compose hash: {live.compose_hash}")
+        if live and live.compose_hash_algorithm:
+            attestation_surface_evidence.append(f"compose hash algorithm: {live.compose_hash_algorithm}")
+        if live and live.attestation_components:
+            attestation_surface_evidence.append(f"components: {', '.join(live.attestation_components[:4])}")
+        if live:
+            if not live.reachable:
+                attestation_surface_status = "skip"
+            elif live.attestation_found and live.app_compose_present and live.compose_hash_match:
+                attestation_surface_status = "pass"
+            elif live.attestation_found:
+                attestation_surface_status = "warn"
+            else:
+                attestation_surface_status = "fail"
+            attestation_status = "skip" if not live.reachable else "fail" if not live.attestation_found or live.quote_verified is False or live.measurement_binding_match is False else "pass" if live.compose_hash_match and live.quote_present and live.quote_measurements_present and live.quote_verified is True and live.measurement_binding_match is True else "warn"
+            attestation_summary = "Attestation proof is strong: quote verification, compose hash, and measurement binding all line up." if attestation_status == "pass" else "Attestation evidence exists, but the hardware-proof chain is incomplete." if attestation_status == "warn" else "Live target unavailable or no live URL provided; attestation not verifiable." if attestation_status == "skip" else "Attestation proof failed or no convincing attestation path was found."
+        else:
+            attestation_surface_status = "skip"
+            attestation_status = "skip"
+            attestation_summary = "No live target was provided."
+        attestation_surface_summary = "A live attestation surface was found and its compose metadata is internally coherent." if attestation_surface_status == "pass" else "An attestation surface exists, but it is only partial or not fully coherent." if attestation_surface_status == "warn" else "Live target unavailable or no live URL provided; attestation surface not verifiable." if attestation_surface_status == "skip" else "No convincing attestation surface was found."
+        attestation_evidence = list(attestation_surface_evidence)
+        if live:
+            attestation_evidence.append(f"quote present: {'yes' if live.quote_present else 'no'}")
+            attestation_evidence.append(f"quote measurements present: {'yes' if live.quote_measurements_present else 'no'}")
+            attestation_evidence.append(f"quote verified: {live.quote_verified if live.quote_verified is not None else 'unverified'}")
+            attestation_evidence.append(f"quote source: {live.quote_source or 'unverified'}")
+            attestation_evidence.append(f"measurement binding: {live.measurement_binding_match if live.measurement_binding_match is not None else 'unverified'}")
+            if live.measurement_binding_kind:
+                attestation_evidence.append(f"measurement binding kind: {live.measurement_binding_kind}")
+            attestation_evidence.extend(live.measurement_bindings[:3])
+            if live.quote_verifier:
+                attestation_evidence.append(f"quote verifier: {live.quote_verifier}")
+            attestation_evidence.extend(live.quote_verification_evidence[:3])
+            attestation_evidence.extend([f"live note: {note}" for note in live.notes[:3]])
+        add_check(checks, "attestation_surface", "Attestation surface", "triage", attestation_surface_status, attestation_surface_summary, attestation_surface_evidence, "Expose a public attestation path or 8090 metadata for third-party verification.")
+        add_check(checks, "attestation", "Attestation", "strong", attestation_status, attestation_summary, attestation_evidence, "Require quote verification plus a compose-hash-to-measurement binding before treating attestation as strong proof.")
+        traceability_evidence = []
+        if live and live.app_id:
+            traceability_evidence.append(f"app id: {live.app_id}")
+        if live and live.attestation_url:
+            traceability_evidence.append(f"attestation endpoint: {live.attestation_url}")
+        if live and live.compose_hash:
+            traceability_evidence.append(f"compose hash: {live.compose_hash}")
+        traceability_status = "warn" if live and live.attestation_found else "skip"
+        traceability_summary = "Live deployment identity is partially known, but no repo was provided for linkage." if traceability_status == "warn" else "Repo-to-deployment traceability is not verifiable from the available inputs."
+        add_check(checks, "deployment_traceability", "Deployment traceability", "strong", traceability_status, traceability_summary, traceability_evidence, "Provide both a repo and a live URL, then pin the deployment to a source commit and digest.")
     if live and live.url:
         if not live.reachable:
             endpoint_status = "fail"
@@ -897,8 +1470,8 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
             endpoint_evidence.append(f"main URL status: HTTP {live.main_url_status}")
         if live.main_url_error:
             endpoint_evidence.append(f"main URL error: {live.main_url_error}")
-        add_check(checks, "endpoint_health", "Application endpoint health", endpoint_status, endpoint_summary, endpoint_evidence, "Expose a healthy application endpoint or document expected non-200 responses.")
-        evidence = [item for item in [f"subject: {live.cert_subject}" if live.cert_subject else None, f"issuer: {live.cert_issuer}" if live.cert_issuer else None, f"notAfter: {live.cert_not_after}" if live.cert_not_after else None, f"fingerprint: {live.cert_fingerprint}" if live.cert_fingerprint else None, f"attestation endpoint: {live.attestation_url}" if live.attestation_url else None] if item]
+        add_check(checks, "endpoint_health", "Application endpoint health", "triage", endpoint_status, endpoint_summary, endpoint_evidence, "Expose a healthy application endpoint or document expected non-200 responses.")
+        evidence = [item for item in [f"subject: {live.cert_subject}" if live.cert_subject else None, f"issuer: {live.cert_issuer}" if live.cert_issuer else None, f"notAfter: {live.cert_not_after}" if live.cert_not_after else None, f"fingerprint: {live.cert_fingerprint}" if live.cert_fingerprint else None, f"attestation endpoint: {live.attestation_url}" if live.attestation_url else None, f"boundary: {live.tls_boundary_model}" if live.tls_boundary_model else None] if item]
         if live.attested_cert_fingerprints:
             evidence.append(f"attested cert fingerprints: {', '.join(live.attested_cert_fingerprints[:2])}")
         evidence.extend(live.notes[:4])
@@ -906,20 +1479,57 @@ def build_checks(repo: RepoFacts | None, live: LiveFacts | None, rebuild_verify:
             tls_status = "skip"
             summary = "Live URL unreachable; TLS not verifiable."
         else:
-            tls_status = "fail" if not live.https or not live.tls_ok and not live.attestation_found else "pass" if live.tls_binding_match else "warn" if live.tls_ok else "fail"
+            tls_status = "fail" if live.tls_binding_mismatch or not live.https or (not live.tls_ok and not live.attestation_found) else "pass" if live.tls_binding_match else "warn" if live.tls_ok else "fail"
             if tls_status == "pass":
-                summary = "The live certificate appears to be bound to attestation evidence."
+                summary = "The live certificate is explicitly bound to attestation evidence."
+            elif tls_status == "warn" and live.attestation_found and live.tls_boundary_model in {"gateway-terminated-phala", "custom-domain-to-gateway"}:
+                summary = "TLS appears to terminate at a gateway boundary; the app trust boundary needs explicit explanation."
             elif tls_status == "warn" and live.attestation_found:
-                summary = "The website has HTTPS and some attestation surface, but the binding is not explicit."
+                summary = "The website has HTTPS and some attestation surface, but the binding is not explicit enough for strong proof."
             elif tls_status == "warn":
                 summary = "The website has HTTPS, but no attestation-backed TLS proof was found."
             else:
-                summary = "HTTPS is absent or broken, or no attestation-backed TLS proof was found."
-        add_check(checks, "tls_binding", "Website TLS binding", tls_status, summary, evidence + ([f"tls error: {live.tls_error}"] if live.tls_error else []), "Expose cert or key binding in attestation, or document the attested gateway boundary.")
+                summary = "HTTPS is absent or broken, or the attested binding does not match the live certificate."
+        if live.tls_binding_kind:
+            evidence.append(f"binding kind: {live.tls_binding_kind}")
+        add_check(checks, "tls_binding", "Website TLS binding", "strong", tls_status, summary, evidence + ([f"tls error: {live.tls_error}"] if live.tls_error else []), "Expose cert or key binding in attestation, or document the attested gateway boundary.")
     else:
-        add_check(checks, "endpoint_health", "Application endpoint health", "skip", "No website URL was provided.", [], "Provide a live URL.")
-        add_check(checks, "tls_binding", "Website TLS binding", "skip", "No website URL was provided.", [], "Provide a live URL.")
+        add_check(checks, "endpoint_health", "Application endpoint health", "triage", "skip", "No website URL was provided.", [], "Provide a live URL.")
+        add_check(checks, "tls_binding", "Website TLS binding", "strong", "skip", "No website URL was provided.", [], "Provide a live URL.")
     return checks
+
+
+def summarize_layer(checks: list[Check], layer: str) -> dict[str, object]:
+    layer_checks = [check for check in checks if check.layer == layer]
+    if not layer_checks:
+        return {"status": "skip", "verdict": "No checks ran in this layer.", "categories": []}
+    statuses = [check.status for check in layer_checks]
+    if any(status == "fail" for status in statuses):
+        status = "fail"
+    elif any(status == "warn" for status in statuses):
+        status = "warn"
+    elif all(status == "skip" for status in statuses):
+        status = "skip"
+    else:
+        status = "pass"
+    verdict = (
+        "Initial triage found concrete red flags that deserve manual follow-up."
+        if layer == "triage" and status == "fail"
+        else "Initial triage found some promising signals, but it is not clean enough to stop here."
+        if layer == "triage" and status == "warn"
+        else "Initial triage found no obvious red flags."
+        if layer == "triage" and status == "pass"
+        else "Initial triage could not be completed."
+        if layer == "triage"
+        else "The strong-proof chain has hard failures."
+        if status == "fail"
+        else "The strong-proof chain is incomplete; do not treat heuristics as proof."
+        if status == "warn"
+        else "All strong-proof checks passed."
+        if status == "pass"
+        else "Strong-proof checks could not be completed."
+    )
+    return {"status": status, "verdict": verdict, "categories": [check.category for check in layer_checks]}
 
 
 def summarize(checks: list[Check], live: LiveFacts | None) -> dict:
@@ -932,23 +1542,25 @@ def summarize(checks: list[Check], live: LiveFacts | None) -> dict:
             total += STATUS_VALUE[check.status] * weight
             possible += weight
     score = round((total / possible) * 100) if possible else 0
-    needed = ["attestation", "auditability", "reproducibility", "operator_gap", "upgrade_transparency"]
-    statuses = [by_category.get(name, "skip") for name in needed]
+    triage = summarize_layer(checks, "triage")
+    strong_proof = summarize_layer(checks, "strong")
+    strong_needed = ["attestation", "tls_binding", "reproducibility", "operator_gap", "upgrade_transparency", "deployment_traceability"]
+    strong_statuses = [by_category.get(name, "skip") for name in strong_needed]
     has_live_target = bool(live and live.url)
-    attestation_status = by_category.get("attestation", "skip")
+    attestation_surface_status = by_category.get("attestation_surface", "skip")
     if live and live.url and not live.reachable:
         stage = "Unproven"
         blockers = [c.summary for c in checks if c.status == "fail"][:6]
         verdict = "INCONCLUSIVE: the live website could not be reached, so trust claims remain unverified."
         score = min(score, 25)
-        return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers}
-    if not has_live_target or attestation_status != "pass":
+        return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers, "triage": triage, "strong_proof": strong_proof}
+    if not has_live_target or attestation_surface_status not in {"pass", "warn"}:
         stage = "Unproven"
     else:
-        stage = "Stage 1 candidate" if all(s == "pass" for s in statuses) else "Stage 0"
+        stage = "Stage 1 candidate" if all(s == "pass" for s in strong_statuses) else "Stage 0"
     blockers = [c.summary for c in checks if c.status == "fail"][:6]
-    verdict = "SAFE under the DevProof model, subject to normal audit caution." if stage == "Stage 1 candidate" and score >= 80 and not blockers else "PARTIAL: the app may use real TEE security, but users still rely on the operator." if stage == "Stage 0" else "NOT SAFE TO ASSUME: the evidence does not yet support a strong TEE trust claim."
-    return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers}
+    verdict = "SAFE under the DevProof model, subject to normal audit caution." if stage == "Stage 1 candidate" and not blockers else "PARTIAL: the app may show real TEE signals, but the strong-proof chain is not closed." if stage == "Stage 0" else "NOT SAFE TO ASSUME: the evidence does not yet support a strong TEE trust claim."
+    return {"score": score, "stage": stage, "verdict": verdict, "critical_blockers": blockers, "triage": triage, "strong_proof": strong_proof}
 
 def status_to_matrix(status: str) -> tuple[str, str]:
     if status == "pass":
@@ -986,6 +1598,7 @@ def build_one_glance(checks: list) -> list[dict[str, str]]:
         ("attestation", "Attestation integrity"),
         ("endpoint_health", "Application endpoint health"),
         ("tls_binding", "TLS binding"),
+        ("deployment_traceability", "Repo-to-deployment traceability"),
         ("reproducibility", "Build reproducibility"),
         ("upgrade_transparency", "Upgrade transparency"),
     ]
@@ -1007,6 +1620,7 @@ def build_verification_checklist(repo: RepoFacts | None, live: LiveFacts | None,
     repro_check = by_category.get("reproducibility")
     operator_check = by_category.get("operator_gap")
     upgrade_check = by_category.get("upgrade_transparency")
+    traceability_check = by_category.get("deployment_traceability")
 
     app_id = live.app_id if live else None
     cluster = live.cluster_domain if live else None
@@ -1046,7 +1660,8 @@ def build_verification_checklist(repo: RepoFacts | None, live: LiveFacts | None,
             "answers": [
                 f"Attestation reachable: {'yes' if live and live.attestation_found else 'no'}",
                 f"Compose hash match: {live.compose_hash_match if live and live.compose_hash_match is not None else 'unverified'}",
-                "Quote signature verified: unverified (dcap-qvl not run by checker)",
+                f"Quote signature verified: {live.quote_verified if live and live.quote_verified is not None else 'unverified'}",
+                f"Measurement binding: {live.measurement_binding_match if live and live.measurement_binding_match is not None else 'unverified'}",
             ],
         }
     )
@@ -1059,7 +1674,8 @@ def build_verification_checklist(repo: RepoFacts | None, live: LiveFacts | None,
             "answers": [
                 f"TLS fingerprint: {live.cert_fingerprint if live and live.cert_fingerprint else 'unverified'}",
                 f"Attested cert match: {live.tls_binding_match if live and live.tls_binding_match is not None else 'unverified'}",
-                "Boundary: document gateway vs app if TLS terminates outside the app TEE.",
+                f"Binding kind: {live.tls_binding_kind if live and live.tls_binding_kind else 'unverified'}",
+                f"Boundary: {live.tls_boundary_model if live and live.tls_boundary_model else 'unverified'}",
             ],
         }
     )
@@ -1073,6 +1689,7 @@ def build_verification_checklist(repo: RepoFacts | None, live: LiveFacts | None,
                 f"Repo commit: {repo.git_head if repo and repo.git_head else 'unverified'}",
                 f"Deployed image digest(s): {', '.join(deployed_digests) if deployed_digests else 'unverified'}",
                 "Rebuild result: see reproducibility check for mismatch or failure reason.",
+                f"Traceability: {traceability_check.summary if traceability_check else 'unverified'}",
             ],
         }
     )
@@ -1107,6 +1724,10 @@ def build_verification_checklist(repo: RepoFacts | None, live: LiveFacts | None,
 def render_text(payload: dict) -> str:
     summary = payload["summary"]
     lines = [f"Verdict: {summary['verdict']}", f"Stage:   {summary['stage']}", f"Score:   {summary['score']}/100"]
+    if summary.get("triage"):
+        lines.append(f"Triage:  {summary['triage']['status'].upper()} - {summary['triage']['verdict']}")
+    if summary.get("strong_proof"):
+        lines.append(f"Proof:   {summary['strong_proof']['status'].upper()} - {summary['strong_proof']['verdict']}")
     if payload["repo"]:
         lines.append(f"Repo:    {payload['repo']['target']}")
     if payload["live"]:
@@ -1129,16 +1750,26 @@ def render_text(payload: dict) -> str:
         for blocker in summary["critical_blockers"]:
             lines.append(f"  - {blocker}")
     lines.append("")
-    for check in payload["checks"]:
-        lines.append(f"[{check['status'].upper()}] {check['title']}: {check['summary']}")
-        for item in check["evidence"][:4]:
-            lines.append(f"    {item}")
+    for layer, label in [("triage", "Initial triage"), ("strong", "Strong-proof checks")]:
+        layer_checks = [check for check in payload["checks"] if check.get("layer") == layer]
+        if not layer_checks:
+            continue
+        lines.append(f"{label}:")
+        for check in layer_checks:
+            lines.append(f"[{check['status'].upper()}] {check['title']} ({check.get('evidence_grade', 'unknown').upper()}): {check['summary']}")
+            for item in check["evidence"][:4]:
+                lines.append(f"    {item}")
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
 def render_markdown(payload: dict) -> str:
     summary = payload["summary"]
     lines = ["# Check TEE Attestation Report", "", "## Summary", "", f"- Verdict: {summary['verdict']}", f"- Stage: {summary['stage']}", f"- Score: {summary['score']}/100"]
+    if summary.get("triage"):
+        lines.append(f"- Initial triage: {summary['triage']['status'].upper()} - {summary['triage']['verdict']}")
+    if summary.get("strong_proof"):
+        lines.append(f"- Strong-proof chain: {summary['strong_proof']['status'].upper()} - {summary['strong_proof']['verdict']}")
     if payload["repo"]:
         lines.append(f"- Repo: {payload['repo']['target']}")
     if payload["live"]:
@@ -1166,13 +1797,18 @@ def render_markdown(payload: dict) -> str:
         for blocker in summary["critical_blockers"]:
             lines.append(f"- {blocker}")
     lines.extend(["", "## Checks", ""])
-    for check in payload["checks"]:
-        lines.extend([f"### {check['title']}", "", f"- Status: {check['status'].upper()}", f"- Summary: {check['summary']}"])
-        if check["recommendation"]:
-            lines.append(f"- Recommendation: {check['recommendation']}")
-        for item in check["evidence"][:6]:
-            lines.append(f"- Evidence: {item}")
-        lines.append("")
+    for layer, label in [("triage", "Initial Triage"), ("strong", "Strong-Proof Checks")]:
+        layer_checks = [check for check in payload["checks"] if check.get("layer") == layer]
+        if not layer_checks:
+            continue
+        lines.extend([f"### {label}", ""])
+        for check in layer_checks:
+            lines.extend([f"#### {check['title']}", "", f"- Status: {check['status'].upper()}", f"- Evidence Grade: {str(check.get('evidence_grade', 'unknown')).upper()}", f"- Summary: {check['summary']}"])
+            if check["recommendation"]:
+                lines.append(f"- Recommendation: {check['recommendation']}")
+            for item in check["evidence"][:6]:
+                lines.append(f"- Evidence: {item}")
+            lines.append("")
     return "\n".join(lines)
 
 
@@ -1188,8 +1824,22 @@ def write_evidence(dir_path: Path, live: LiveFacts | None, repo: RepoFacts | Non
         "main_url_error": live.main_url_error if live else None,
         "attestation_url": live.attestation_url if live else None,
         "compose_hash": live.compose_hash if live else None,
+        "compose_hash_raw": live.compose_hash_raw if live else None,
+        "compose_hash_canonical": live.compose_hash_canonical if live else None,
+        "compose_hash_algorithm": live.compose_hash_algorithm if live else None,
         "compose_hash_match": live.compose_hash_match if live else None,
+        "quote_present": live.quote_present if live else None,
+        "quote_measurements_present": live.quote_measurements_present if live else None,
+        "quote_verified": live.quote_verified if live else None,
+        "quote_verifier": live.quote_verifier if live else None,
+        "quote_source": live.quote_source if live else None,
+        "measurement_binding_match": live.measurement_binding_match if live else None,
+        "measurement_binding_kind": live.measurement_binding_kind if live else None,
         "tls_fingerprint": live.cert_fingerprint if live else None,
+        "tls_binding_match": live.tls_binding_match if live else None,
+        "tls_binding_kind": live.tls_binding_kind if live else None,
+        "tls_boundary_model": live.tls_boundary_model if live else None,
+        "cloud_api_url": live.cloud_api_url if live else None,
         "repo_target": repo.target if repo else None,
         "repo_remote": repo.remote_url if repo else None,
         "repo_git_head": repo.git_head if repo else None,

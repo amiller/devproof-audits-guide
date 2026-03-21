@@ -23,6 +23,8 @@ Signal key: GREEN=closed, YELLOW=partial/unknown, RED=attackable
 | Verdict | SAFE / PARTIAL / NOT SAFE | One sentence |
 | Stage | Unproven / Stage 0 / Stage 1 candidate | Why |
 | Score | 0-100 | Weighted score |
+| Initial triage | PASS / WARN / FAIL | Fast red-flag layer |
+| Strong proof | PASS / WARN / FAIL | Quote / binding / reproducibility / traceability |
 | Website | PASS / WARN / FAIL | TLS and live evidence |
 | Repo | PASS / WARN / FAIL | Auditability and reproducibility |
 
@@ -37,13 +39,25 @@ Signal key: GREEN=closed, YELLOW=partial/unknown, RED=attackable
 
 - endpoint:
 - compose hash:
+- compose-hash algorithm:
+- measurement binding:
+- quote verifier:
 - repo-to-live link:
 
 ### TLS
 
 - certificate issuer:
 - certificate fingerprint:
+- boundary model:
 - binding evidence:
+
+### Deployment Traceability
+
+- repo remote:
+- repo commit:
+- app id:
+- deployed digest / compose hash:
+- evidence grade:
 
 ### Operator Gap
 
