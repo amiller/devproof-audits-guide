@@ -228,6 +228,7 @@ Red flags:
 - KMS IDs or key-provider IDs in operator-controlled envs
 
 If any red flag appears, the result is at best `Stage 0` (PARTIAL).
+Keep the current conservative scoring, but explain the risk shape in the write-up: a fixed public SaaS dependency such as `OPENAI_API_KEY` pointed at a well-known public endpoint is not the same as an operator-controlled private host, mutable download URL, or self-hosted API that can redirect code or user data.
 
 ## Decision Layers
 
@@ -405,7 +406,8 @@ Prompt to answer:
 
 How to check:
 - Scan app_compose for allowed_envs.
-- Any URL/image in allowed_envs => operator can steer data or swap code.
+- Any URL/image in allowed_envs remains a conservative red flag in this skill.
+- In the write-up, distinguish fixed public SaaS dependencies from private or operator-controlled endpoints; the latter is the stronger exfiltration signal.
 - Any image: ${VAR} with VAR in allowed_envs => deployment is unverifiable to third parties.
 
 ### F. Upgrade transparency

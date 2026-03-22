@@ -8,7 +8,7 @@ One-glance verdict: SAFE / PARTIAL / NOT SAFE + key reason
 
 | Dimension | Status | Signal | Evidence |
 | --- | --- | --- | --- |
-| Operator gap (can operator exfiltrate?) | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | allowed_envs, ${VAR} URLs |
+| Operator gap (can operator exfiltrate?) | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | allowed_envs, ${VAR} URLs, plus note on public SaaS vs operator-controlled endpoints |
 | Attestation integrity | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | TDX quote + compose_hash match |
 | TLS binding | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | certFingerprint vs attestation |
 | Build reproducibility | PASS / FAIL / PARTIAL | GREEN / RED / YELLOW | digest pin + SOURCE_DATE_EPOCH |
@@ -64,6 +64,7 @@ Signal key: GREEN=closed, YELLOW=partial/unknown, RED=attackable
 - configurable URLs:
 - `allowed_envs`:
 - mutable image refs:
+- interpretation note: keep the conservative score, but explain whether the mutable value only targets a fixed public SaaS dependency or a private/operator-controlled host that can redirect code or user data.
 
 ### Upgrade Transparency
 

@@ -1700,7 +1700,8 @@ def build_verification_checklist(repo: RepoFacts | None, live: LiveFacts | None,
             "status": status_from_check(operator_check),
             "summary": operator_check.summary if operator_check else "Operator gap not evaluated.",
             "answers": [
-                "If any URL or image appears in allowed_envs, operator can steer data or swap code.",
+                "Any URL or image in allowed_envs remains a conservative red flag in this skill.",
+                "In the write-up, distinguish fixed public SaaS dependencies from private or operator-controlled endpoints; the latter is the stronger exfiltration signal.",
                 "If image: ${VAR} where VAR is in allowed_envs, deployment is unverifiable to third parties.",
             ],
         }
