@@ -43,6 +43,7 @@ See [framework/STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) for detaile
 |---------|-------|-----------|
 | [hermes](case-studies/hermes/) | 0 | Pha KMS (no public upgrade log), mutable image tags |
 | [near-private-chat](case-studies/near-private-chat/) | 0 | Backend routing unverified, 56 compose hashes authorized |
+| [near-ai-private-inference](case-studies/near-ai-private-inference/) | 0 | Inner compose not in RTMR3, model weights unverified, operator log access |
 | [primus](case-studies/primus/) | 0 | Closed-source core (`libpado.so`), binary blobs |
 | [talos](case-studies/talos/) | ~1 | Reproducible builds, but enclave ID verification gap |
 | [tee-totalled](case-studies/tee-totalled/) | 0 | `LLM_BASE_URL` operator-configurable (exfiltration) |

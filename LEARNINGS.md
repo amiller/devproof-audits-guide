@@ -30,6 +30,8 @@ Every audit found the same pattern: a URL that handles user data is configurable
 | xordi-toy-example | `MOCK_API_URL` | Token exfiltration |
 | tee-totalled | `LLM_BASE_URL` | Message exfiltration |
 | hermes | Hardcoded (good) | N/A |
+| near-ai-inference | `MODEL_DISCOVERY_SERVER_URL` | Backend routing, model substitution |
+| near-ai-inference | `HF_ENDPOINT` (vLLM) | Model weight download redirection |
 
 **The fix:** Hardcode URLs in docker-compose.yml, not as `${VAR}` references.
 
@@ -409,3 +411,83 @@ For any dstack app (fail any = Stage 0):
 7. [ ] Any dev fallbacks that could be triggered in production?
 8. [ ] Are you reviewing the deployed commit (not branch HEAD)?
 9. [ ] Can you trace: compose_hash → docker_compose_file → image digest → source commit?
+
+---
+
+## 16. Post-Boot Deployment Managers Break the Measurement Chain
+
+**New pattern from near-ai-private-inference:**
+
+If a CVM's boot compose deploys a "compose manager" that dynamically pulls and launches the real workload AFTER boot, the inner workload is NOT in RTMR3. The attestation proves the manager is running, not what it deployed.
+
+dstack's `emit_runtime_event` API IS available post-boot and unrestricted. `verify_tdx()` replays ALL events including post-boot. **The infrastructure to fix this exists — the manager just needs to call emit_event.**
+
+**Pattern:** Boot compose → compose-manager → inner compose (unmeasured)
+**Fix:** Manager calls `emit_event("inner-compose-hash", sha256)` after each deployment
+
+---
+
+## 17. Container Log APIs Are a Privacy Backdoor
+
+**New pattern from near-ai-private-inference:**
+
+Management APIs that expose raw container logs (`docker compose logs`) give the operator access to whatever the application prints to stdout/stderr. Even if the main application carefully avoids logging user data, backend error messages, validation failures, or debug output can leak request/response content.
+
+| Component | Log API | Auth | Risk |
+|-----------|---------|------|------|
+| compose-manager | POST /compose/logs | BEARER_TOKEN | Raw docker logs, unfiltered |
+| Datadog agent | DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true | None (inside CVM) | All container logs to operator endpoint |
+| dstack public_logs | /v1/worker/info (default: public) | None | Container logs if enabled |
+
+**The fix:** Disable blanket log collection. Audit what each component logs at the configured level. Sanitize error messages.
+
+---
+
+## 18. HuggingFace Reliance Is Like zkTLS
+
+**New pattern from near-ai-private-inference:**
+
+When a TEE application downloads model weights from HuggingFace by name (e.g. `deepseek-ai/DeepSeek-V3.1`), it introduces an unattested reliance on HuggingFace infrastructure:
+
+- `HF_ENDPOINT` env var can redirect downloads to a mirror/proxy
+- `huggingface_hub` library does NOT auto-verify SHA256 checksums
+- No model revision pinning (git commit hash) means different weights could be served
+- Named Docker volumes are persistent — operator can pre-load different weights
+
+This is analogous to zkTLS: the TEE proves code execution, but the external data source (HuggingFace) is trusted implicitly.
+
+**The fix:** Pin model revisions by commit hash. Set HF_ENDPOINT explicitly. Hash weights at load time.
+
+---
+
+## 19. Separate Privacy Stages: Cloud Provider vs Operator
+
+**New insight from near-ai-private-inference:**
+
+dstack's trust model explicitly assumes the operator is semi-trusted. "Stage 0" lumps together two different failures:
+
+- **Privacy from cloud provider:** Strong (TDX hardware, memory encryption, TLS in TEE)
+- **Privacy from operator:** Weak (compose-manager API, .decrypted-env, Datadog)
+- **Model identity:** Absent (no weight verification, runtime switching)
+
+A more useful stage rating separates these axes. An app can be Stage 2 for cloud-provider privacy while Stage 0 for operator privacy.
+
+---
+
+## Updated Stage 1 Quick Check
+
+For any dstack app (fail any = Stage 0):
+
+1. [ ] Are URLs handling user data hardcoded in compose (not `${VAR}`)?
+2. [ ] Is the image pinned by digest in docker_compose_file (not `${IMAGE_VAR}` in allowed_envs)?
+3. [ ] Does it use Base KMS (for transparency logs)?
+4. [ ] Is there a DEPLOYMENTS.md or on-chain history?
+5. [ ] Are builds reproducible (pinned base images, SOURCE_DATE_EPOCH)?
+6. [ ] Any "known issue" comments around security checks?
+7. [ ] Any dev fallbacks that could be triggered in production?
+8. [ ] Are you reviewing the deployed commit (not branch HEAD)?
+9. [ ] Can you trace: compose_hash → docker_compose_file → image digest → source commit?
+10. [ ] If a post-boot manager deploys workloads, does it extend RTMR3?
+11. [ ] Are container log APIs restricted and audited?
+12. [ ] Are external data sources (HuggingFace, etc.) pinned and verified?
+13. [ ] Is .decrypted-env protected or ephemeral?
