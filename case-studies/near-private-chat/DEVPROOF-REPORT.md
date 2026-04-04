@@ -1,7 +1,7 @@
 # NEAR AI Private Chat - Audit Analysis
 
-**Audited:** 2026-01-09/10
-**Version:** v0.1.10
+**Initial audit:** 2026-01-09/10 (pinned to commit `80e73e25`, between v0.1.9 and v0.1.10)
+**Follow-up:** 2026-04-03 (pinned to `prod-20260402-003658`, commit `2cb48d2c54da`)
 **Core Question:** Can we verify the claim that conversation data does not leak?
 
 ## Executive Summary
@@ -11,10 +11,10 @@
 | TLS termination in TEE | ✅ Yes | Cert bound to TDX quote via report_data |
 | chat-api code | ✅ Yes | Compose hash in attestation |
 | chat-api → cloud-api routing | ✅ Yes | OPENAI_BASE_URL hardcoded in compose |
-| cloud-api → vLLM routing | ❌ No | MODEL_DISCOVERY_SERVER_URL is runtime config, NO reference value verification |
+| cloud-api → vLLM routing | ❌ Critical | Discovery server removed (PR#513), but attestation still never verified; signing keys TOFU; Issue #224 open 4 months |
 | Database contents | ✅ Metadata only | Chat messages NOT stored - only conversation IDs |
-| Upgrade protection (AppAuth) | ❌ Unverifiable | Contracts on Base are not source-verified |
-| Audit scope | ⚠️ 56 versions | 56 compose hashes authorized, only current analyzed |
+| Upgrade protection (AppAuth) | ⚠️ Moderate | Mechanism works, but contract governance unverified (bytecode not compared to reference) |
+| Audit scope | ℹ️ Note | 56 compose hashes authorized, only current analyzed; 55 not reviewed |
 
 ---
 
@@ -356,13 +356,76 @@ Querying `ComposeHashAdded` events on Base reveals **56 total authorized compose
 
 ## Concerns Summary
 
-### Critical Gaps
-- **AppAuth contracts unverified** - Cannot confirm upgrade protection exists
-- **vLLM backend routing unverified** - MODEL_DISCOVERY_SERVER_URL is runtime config with NO reference value checking
-- **56 authorized compose hashes** - Operator can switch to any previous version; older versions may lack current security properties
+### Critical: vLLM backend attestation never cryptographically verified
+**Vectors: Privacy compromise, Model manipulation**
 
-### Moderate Concerns
-- **Datadog agent in TEE** - Has access to TEE environment for telemetry
+cloud-api fetches attestation reports from vLLM backends but performs **zero cryptographic verification** — no TDX quote validation, no compose_hash check, no app_id check. Any server returning parseable JSON is accepted. This gap has persisted across two major architectural changes and is acknowledged by the NEAR team as an open issue.
+
+#### Timeline
+
+| Date | Event | Impact |
+|------|-------|--------|
+| 2025-12-03 | [Issue #224](https://github.com/nearai/cloud-api/issues/224) opened: "cloud-api should only add verified model nodes" | Team acknowledges gap; mentions Rust verification SDK "in next few weeks" |
+| 2025-12-24 | [PR #298](https://github.com/nearai/cloud-api/pull/298): E2EE introduced | `signing_public_key` extracted from unverified JSON (TOFU) |
+| 2026-01-09 | **Our initial audit** (commit [`80e73e25`](https://github.com/nearai/cloud-api/blob/80e73e254485c4d59c19335eb33c1e98035bafac/crates/services/src/inference_provider_pool/mod.rs#L240-L254)) | `MODEL_DISCOVERY_SERVER_URL` runtime-configurable; `has_valid_attestation = true` if HTTP succeeds |
+| 2026-03-02 | [PR #458](https://github.com/nearai/cloud-api/pull/458): Gate DEV mode attestation bypass behind debug_assertions | **Previously, `DEV=true` could disable attestation in production builds** |
+| 2026-03-13 | [PR #485](https://github.com/nearai/cloud-api/pull/485): Add `inference_url` column to models DB | Groundwork for discovery server removal |
+| 2026-03-26 | [PR #513](https://github.com/nearai/cloud-api/pull/513): Remove discovery server (~1000 lines) | `inference_url` now set in DB by operator; `MODEL_DISCOVERY_SERVER_URL` vestigial |
+| 2026-04-02 | Current production (`prod-20260402-003658`) | Post-PR#513 code deployed; **attestation verification still absent** |
+| 2026-04-03 | Issue #224 still open | 4 months, no verification SDK shipped |
+
+#### Evidence (pinned to `prod-20260402-003658`, commit [`2cb48d2c54da`](https://github.com/nearai/cloud-api/tree/2cb48d2c54da794217ee31f730dbbf94b977c8f0))
+
+**1. Attestation fetch — zero verification:**
+[`vllm/mod.rs:307-376`](https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/inference_providers/src/vllm/mod.rs#L307-L376) — `get_attestation_report()` sends HTTP GET, parses JSON, returns it. No TDX quote parsing, no signature check, no compose_hash/app_id validation. Zero occurrences of `compose_hash`, `app_id`, `verify_quote`, or `tdx` in the entire inference_provider_pool module.
+
+**2. Signing key = trust-on-first-use:**
+[`inference_provider_pool/mod.rs:244-289`](https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L244-L289) — `signing_public_key` extracted from untrusted JSON response, stored directly. Any server can claim any key.
+
+**3. `_has_valid_attestation` discarded:**
+[`inference_provider_pool/mod.rs:1371`](https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L1371) — return value assigned to `_` (discarded). Provider added to pool even if attestation fails entirely.
+
+**4. `MODEL_DISCOVERY_SERVER_URL` still in allowed_envs:**
+Live attestation at `private.near.ai/v1/attestation/report` confirms it remains in `allowed_envs` (vestigial — code no longer reads it, but compose hash still permits it).
+
+**5. Team acknowledgment:**
+[Issue #224](https://github.com/nearai/cloud-api/issues/224) (still open): "cloud-api should verify the attestation quotes from the models and only add the verified model nodes into the list."
+
+#### Old vs New Comparison
+
+| Aspect | Jan 2026 (pre-PR#513) | Apr 2026 (post-PR#513) | Status |
+|--------|----------------------|------------------------|--------|
+| Who sets inference endpoint | Runtime env var (`MODEL_DISCOVERY_SERVER_URL`) | Database (`inference_url` column) | **Improved** |
+| Attestation quote validation | None | None | **SAME** |
+| Signing key trust model | TOFU from JSON | TOFU from JSON | **SAME** |
+| `has_valid_attestation` | Computed, checked | Computed, **discarded** (`_`) | **Worse** |
+| compose_hash/app_id check | None | None | **SAME** |
+| DEV mode attestation bypass | Exploitable in prod | Compile-time only (PR#458) | **Fixed** |
+
+**Impact:** Operator (or anyone with DB access) controls which servers receive user conversations. A malicious backend need only return valid-looking JSON from `/v1/attestation/report` to be accepted. This enables routing conversations to a logging server (privacy compromise) or substituting a different model (manipulation). E2EE signing keys are also trust-on-first-use, so a MITM backend can claim any public key.
+
+**External verification exists but can't help here:** Phala's [`private-ai-verifier`](https://github.com/Phala-Network/private-ai-verifier) SDK includes a NearAI verifier that does full dstack quote validation, compose hash checks, and nonce binding for the outer boundary (ingress, chat-api, cloud-api). This proves client-side verification of those components is feasible. But no external verifier can observe or constrain cloud-api's routing — the operator controls the database that maps models to backend URLs, and nothing in the architecture limits those choices. See `ATTESTATION-GAP-ANALYSIS.md` §5 for details.
+
+#### Additional Finding: PR #501 (unmerged)
+[PR #501](https://github.com/nearai/cloud-api/pull/501) reveals that backend validation errors currently **leak full user conversations in plaintext** in error responses. This is an independent data leak vector.
+
+### Moderate: AppAuth contract governance unverified
+**Vectors: Privacy compromise, Model manipulation (indirect — enables code changes)**
+
+The three DstackApp contracts on Base are not source-verified on Basescan, so we cannot confirm governance logic (who can authorize new compose hashes, whether there are backdoors).
+
+**Evidence:**
+- Contracts exist at the expected addresses and emit `ComposeHashAdded` events matching dstack's reference ABI
+- `query-compose-hashes.py` successfully queries these events (56 hashes found)
+- dstack KMS does check these contracts at boot — the upgrade protection *mechanism* works
+
+**What's missing:** We didn't compare deployed bytecode against the reference implementation at `dstack/kms/auth-eth/contracts/`. This is a verification step we could still perform. The gap is about *who controls the contracts*, not whether the mechanism exists.
+
+### Audit Scope Note: 55 compose hashes not reviewed
+We analyzed only the current compose hash for each component. 55 other authorized hashes (2 ingress, 15 chat-api, 36 cloud-api) remain on-chain and could be booted by the operator. We did not review any older versions, so we cannot confirm or deny whether they have different security properties. A comprehensive audit would need to cover these or recommend their removal.
+
+### Moderate: Datadog agent in TEE
+Has access to TEE environment for telemetry.
 
 ### Verified Good
 - TLS termination bound to TEE attestation
