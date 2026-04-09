@@ -1,0 +1,31 @@
+[
+  {
+    "name": "dstack-tutorial-repo-only",
+    "repo": "../dstack-tutorial",
+    "expected_stage": "Unproven",
+    "expected_checks": {
+      "Repo auditability": "pass",
+      "Reproducibility": "pass",
+      "Attestation": "warn"
+    }
+  },
+  {
+    "name": "tokscope-xordi-artifact",
+    "repo": "case-studies/tokscope-xordi",
+    "expected_stage": "Unproven",
+    "expected_checks": {
+      "Repo auditability": "warn",
+      "Reproducibility": "fail",
+      "Operator gap": "fail"
+    }
+  },
+  {
+    "name": "near-private-chat-notes",
+    "repo": "case-studies/near-private-chat",
+    "expected_stage": "Unproven",
+    "expected_checks": {
+      "Upgrade transparency": "warn",
+      "Code hygiene": "fail"
+    }
+  }
+]
