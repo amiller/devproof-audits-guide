@@ -1,0 +1,14 @@
+[
+  {
+    "name": "private-near-live",
+    "repo": "case-studies/near-private-chat",
+    "url": "https://private.near.ai",
+    "attestation_url": "https://private.near.ai/v1/attestation/report",
+    "expected_stage": "Stage 0",
+    "expected_checks": {
+      "Attestation": "pass",
+      "Website TLS binding": "warn",
+      "Upgrade transparency": "warn"
+    }
+  }
+]

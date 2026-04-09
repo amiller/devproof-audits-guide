@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import date
+import shutil
+import tempfile
+from pathlib import Path
+
+
+SCRIPT_PATH = Path(__file__).resolve().parent / "check_tee_attestation.py"
+DEFAULT_TARGETS_PATH = Path(__file__).resolve().parent / "live_targets.json"
+REPO_ROOT = SCRIPT_PATH.parents[4]
+TMP_ROOT = REPO_ROOT / ".tmp_live_targets"
+
+CATEGORY_ORDER = [
+    "attestation",
+    "tls_binding",
+    "auditability",
+    "reproducibility",
+    "operator_gap",
+    "upgrade_transparency",
+    "code_hygiene",
+]
+CATEGORY_LABELS = {
+    "attestation": "Attestation",
+    "tls_binding": "TLS Binding",
+    "auditability": "Repo Auditability",
+    "reproducibility": "Reproducibility",
+    "operator_gap": "Operator Gap",
+    "upgrade_transparency": "Upgrade Transparency",
+    "code_hygiene": "Code Hygiene",
+}
+
+
+def is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://", "git@"))
+
+
+def resolve_repo(value: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str((REPO_ROOT / path).resolve())
+
+
+def pick_repo(entry: dict) -> str | None:
+    repo_path = entry.get("repo_path") or entry.get("repo")
+    repo_url = entry.get("repo_url")
+    repo_urls = entry.get("repo_urls")
+    if isinstance(repo_path, str) and repo_path:
+        return repo_path
+    if isinstance(repo_url, str) and repo_url:
+        return repo_url
+    if isinstance(repo_urls, list) and len(repo_urls) == 1:
+        only = repo_urls[0]
+        if isinstance(only, str) and only:
+            return only
+    return None
+
+
+def clone_repo(repo_url: str, repo_branch: str | None, repo_commit: str | None) -> tuple[str, str | None, str | None]:
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix="live-target-repo-", dir=str(TMP_ROOT))
+    repo_name = repo_url.rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
+    clone_dir = Path(temp_dir) / repo_name
+    cmd = ["git", "clone", "--depth", "1"]
+    if repo_branch:
+        cmd.extend(["--branch", repo_branch])
+    cmd.extend([repo_url, str(clone_dir)])
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git clone failed")
+    note = None
+    if repo_commit:
+        result = subprocess.run(["git", "-C", str(clone_dir), "checkout", repo_commit], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            fetch = subprocess.run(["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", repo_commit], capture_output=True, text=True, check=False)
+            if fetch.returncode == 0:
+                result = subprocess.run(["git", "-C", str(clone_dir), "checkout", repo_commit], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            note = result.stderr.strip() or result.stdout.strip() or "git checkout failed"
+    return str(clone_dir), temp_dir, note
+
+
+def run_target(entry: dict) -> tuple[bool, str, dict | None, str | None, str | None]:
+    name = entry.get("name") or "(unknown)"
+    repo_value = pick_repo(entry)
+    url = entry.get("url")
+    attestation_url = entry.get("attestation_url")
+    repo_branch = entry.get("repo_branch") if isinstance(entry.get("repo_branch"), str) else None
+    repo_commit = entry.get("repo_commit") if isinstance(entry.get("repo_commit"), str) else None
+    cleanup_dir = None
+    repo_note = None
+
+    cmd = [sys.executable, str(SCRIPT_PATH), "--format", "json"]
+    if isinstance(repo_value, str):
+        if is_url(repo_value):
+            try:
+                repo_arg, cleanup_dir, repo_note = clone_repo(repo_value, repo_branch, repo_commit)
+            except RuntimeError as exc:
+                return False, name, {"error": str(exc)}, cleanup_dir, repo_note
+        else:
+            repo_arg = resolve_repo(repo_value)
+        cmd.extend(["--repo", repo_arg])
+    if isinstance(url, str) and url:
+        cmd.extend(["--url", url])
+    if isinstance(attestation_url, str) and attestation_url:
+        cmd.extend(["--attestation-url", attestation_url])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return False, name, {"error": result.stderr.strip() or result.stdout.strip() or "(no output)"}, cleanup_dir, repo_note
+    try:
+        return True, name, json.loads(result.stdout), cleanup_dir, repo_note
+    except json.JSONDecodeError as exc:
+        return False, name, {"error": f"invalid JSON output: {exc}"}, cleanup_dir, repo_note
+
+
+def main() -> int:
+    targets_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEFAULT_TARGETS_PATH
+    report_date = date.today().isoformat()
+    output_path = REPO_ROOT / f"case-studies-live-report-{report_date}.md"
+
+    payload = json.loads(targets_path.read_text(encoding="utf-8-sig"))
+    entries = payload.get("targets", [])
+
+    lines: list[str] = []
+    lines.append(f"# Case Studies Live Report ({report_date})")
+    lines.append("")
+    lines.append("Generated by running `check_tee_attestation.py` with live URLs from `live_targets.json`.")
+    lines.append("")
+
+    failures = 0
+    for entry in entries:
+        ok, name, data, cleanup_dir, repo_note = run_target(entry)
+        lines.append(f"## {name}")
+        if not ok or not isinstance(data, dict):
+            failures += 1
+            lines.extend(["", "Run status: failed", "", "Error output:", "", "```text", str(data.get("error")), "```", ""])
+            if cleanup_dir:
+                shutil.rmtree(cleanup_dir, ignore_errors=True)
+            continue
+
+        summary = data.get("summary", {})
+        checks = data.get("checks", [])
+        checks_by_cat = {c.get("category"): c for c in checks}
+        repo_value = pick_repo(entry) or "(not provided)"
+        url = entry.get("url") or "(not provided)"
+
+        lines.append("")
+        lines.append(f"Verdict: {summary.get('verdict', 'Unknown')}")
+        lines.append(f"Stage: {summary.get('stage', 'Unknown')}")
+        lines.append(f"Score: {summary.get('score', 'Unknown')}/100")
+        repo_line = f"Repo: {repo_value}"
+        if repo_note:
+            repo_line += f" (note: {repo_note})"
+        lines.append(repo_line)
+        lines.append(f"Website: {url}")
+
+        lines.append("")
+        lines.append("Critical Blockers:")
+        blockers = summary.get("critical_blockers") or []
+        if blockers:
+            for blocker in blockers:
+                lines.append(f"- {blocker}")
+        else:
+            lines.append("- None reported by the checker")
+
+        lines.append("")
+        lines.append("Evidence:")
+        for cat in CATEGORY_ORDER:
+            check = checks_by_cat.get(cat)
+            if not check:
+                continue
+            label = CATEGORY_LABELS.get(cat, cat)
+            lines.append(f"{label}:")
+            evidence = check.get("evidence") or []
+            if evidence:
+                for item in evidence[:4]:
+                    lines.append(f"- {item}")
+            else:
+                lines.append(f"- {check.get('summary', 'No evidence captured.')}")
+
+        next_step = None
+        for status in ("fail", "warn"):
+            for cat in CATEGORY_ORDER:
+                check = checks_by_cat.get(cat)
+                if not check:
+                    continue
+                if check.get("status") == status and check.get("recommendation"):
+                    next_step = check.get("recommendation")
+                    break
+            if next_step:
+                break
+        if not next_step:
+            for cat in CATEGORY_ORDER:
+                check = checks_by_cat.get(cat)
+                if check and check.get("recommendation"):
+                    next_step = check.get("recommendation")
+                    break
+        if not next_step:
+            next_step = "Confirm live endpoints and rerun with explicit attestation URLs if available."
+
+        lines.append("")
+        lines.append("Next Step:")
+        lines.append(f"- {next_step}")
+        lines.append("")
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+    output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    print(str(output_path))
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

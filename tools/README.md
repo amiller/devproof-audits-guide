@@ -2,6 +2,38 @@
 
 Claude Code plugin for auditing dstack/Phala TEE applications.
 
+## Codex Skill
+
+This repo now also includes an installable Codex skill at `tools/skills/check-tee-attestation/`.
+
+Use it when you want a single workflow that accepts a GitHub repo plus a deployed website and returns:
+
+- whether the website is safe to trust under the dstack DevProof model
+- what stage it reaches
+- how strong the attestation and TLS binding are
+- which repo or deployment gaps still block Stage 1
+
+Example:
+
+```bash
+python tools/skills/check-tee-attestation/scripts/check_tee_attestation.py \
+  --repo /path/to/repo \
+  --url https://target.example
+```
+
+Local regression:
+
+```bash
+python tools/skills/check-tee-attestation/scripts/run_regression_cases.py
+```
+
+Live sample regression:
+
+```bash
+python tools/skills/check-tee-attestation/scripts/run_regression_cases.py \
+  tools/skills/check-tee-attestation/scripts/live_regression_cases.json
+```
+
 ## Installation
 
 ```bash
@@ -24,6 +56,15 @@ Start an audit of a dstack application:
 /audit https://github.com/...   # Clone and audit
 ```
 
+### Command: `/check-tee`
+
+Check if a repo + website are safe to interact with under the DevProof model:
+
+```
+/check-tee repo=./path/to/repo url=https://app.example
+/check-tee repo=https://github.com/org/repo url=https://app.example attestation_url=https://app.example/v1/attestation/report
+```
+
 ### Skill: Auto-triggers
 
 The skill automatically activates when you mention:
@@ -38,6 +79,15 @@ Run the automated checks directly:
 
 ```bash
 ./skills/dstack-audit/scripts/audit-checks.sh /path/to/repo
+```
+
+DevProof checker:
+
+```bash
+python tools/skills/check-tee-attestation/scripts/check_tee_attestation.py \
+  --repo /path/to/repo \
+  --url https://app.example \
+  --attestation-url https://app.example/v1/attestation/report
 ```
 
 ## What It Checks
