@@ -220,6 +220,41 @@ A reference implementation of all 8 steps is in `hermes-agent` (`feat/near-ai-at
 **NRAS persistent FAIL verdicts**
 GPU attestation via NRAS returns `False` (not `"PASS"`) consistently across multiple retries. A client enforcing GPU attestation as mandatory cannot complete verification. Official verifiers mask this by skipping GPU or treating FAIL as non-fatal.
 
+### Per-model strict-attestation probe — 2026-04-20
+
+Probed `cloud-api.near.ai/v1` with the hermes-cli strict verifier (TDX quote
+via Phala's verifier + NVIDIA NRAS GPU attestation + E2EE key binding +
+compose hash). No skips, no fallbacks. `max_workers=4`, full probe ~17s.
+
+| Model                                             | Verdict | Probe time | Error |
+|---------------------------------------------------|:-------:|-----------:|-------|
+| `zai-org/GLM-5.1-FP8`                             | ✅ pass | 16.6s      |       |
+| `zai-org/GLM-5-FP8`                               | ✅ pass | 11.2s      |       |
+| `openai/gpt-oss-120b`                             | ❌ fail | 5.7s       | GPU verification failed (NRAS `False`) |
+| `Qwen/Qwen3-30B-A3B-Instruct-2507`                | ❌ fail | 18.0s      | GPU verification failed (NRAS `False`) |
+| `Qwen/Qwen3.5-122B-A10B`                          | ❌ fail | 8.8s       | GPU verification failed (NRAS `False`) |
+| `Qwen/Qwen3-VL-30B-A3B-Instruct`                  | ❌ fail | 8.1s       | GPU verification failed (NRAS `False`) |
+| `deepseek-ai/DeepSeek-V3-0324`                    | ❌ fail | 0.5s       | HTTP 503 from `/v1/attestation/report` |
+| `meta-llama/Llama-4-Scout-17B-16E-Instruct`       | ❌ fail | 0.4s       | HTTP 503 from `/v1/attestation/report` |
+
+**2 of 8 curated models currently pass strict attestation.** The passing pair
+is both `zai-org/GLM-*`. The GPU-attestation-failing set is stable across
+re-probes — this is not transient NRAS flakiness, it's a consistent fleet
+state.
+
+Two endpoints return deterministic HTTP 503 (sub-500ms), suggesting the
+backing CVM is offline or the attestation route doesn't know about those
+models. The endpoint should distinguish "unknown model" from "transient
+unavailable" so clients can surface the right diagnostic.
+
+Reproducible probe harness (strict mode, four-shape redpill verifier
+included for the federated case): see
+[hermes-agent-tee-probe/notes/attestation-probe-results.md](https://github.com/amiller/dstack-hermes)
+and the companion [redpill-federated-inference](../redpill-federated-inference/DEVPROOF-REPORT.md)
+case study which covers Redpill's four-backend router (Phala / NearAI /
+Chutes / Tinfoil) — relevant here because some Redpill models route into
+the NEAR AI fleet and inherit these same failures.
+
 ---
 
 ## Privacy Analysis
