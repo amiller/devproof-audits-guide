@@ -1,8 +1,11 @@
 # NEAR AI Private Inference - Audit Analysis
 
-**Audited:** 2026-03-25
+**Server-side audit:** 2026-03-25
+**Client-side E2EE audit:** 2026-04-19
 **Domain:** cloud-api.near.ai
 **Core Question:** Can we verify that (a) user prompts/responses remain private and (b) the claimed model is what actually runs?
+
+---
 
 ## Executive Summary
 
@@ -11,15 +14,17 @@
 | TLS termination in TEE | ✅ Yes | Cert managed by certbot inside CVM, SPKI hash bound to attestation |
 | Gateway CVM code (cloud-api) | ✅ Yes | Compose hash in RTMR3 via dstack |
 | Backend CVM boot compose | ✅ Yes | compose-manager + certbot + datadog attested in mr_config |
-| Inner compose (vllm + proxy) | ❌ No | Deployed by compose-manager AFTER boot, not in RTMR3 |
+| Inner compose (vllm + proxy) | ❌ No | Deployed post-boot, not in RTMR3 — **breaks E2EE trust chain** |
 | inference-proxy signing | ✅ Yes | ECDSA + Ed25519 dual signatures, keys from dstack KMS |
-| NVIDIA GPU attestation | ✅ Yes | GPU evidence via NRAS, same nonce as TDX quote |
-| cloud-api → backend routing | ❌ No | MODEL_DISCOVERY_SERVER_URL is runtime env var |
+| NVIDIA GPU attestation (design) | ✅ Yes | GPU evidence via NRAS, same nonce as TDX quote |
+| NVIDIA GPU attestation (live) | ❌ Failing | NRAS returning persistent FAIL verdicts, April 2026 |
+| cloud-api → backend routing | ❌ No | Signing keys TOFU from unverified JSON; Issue #224 open 4+ months |
+| nearai-cloud-verifier E2EE | ❌ Broken | Fetches signing_public_key without verifying model TDX quote |
+| private-ai-verifier E2EE | ❌ Missing | Full TDX chain but no E2EE implementation at all |
 | Model weight identity | ❌ No | vLLM downloads from HuggingFace by name, no checksum |
-| HuggingFace endpoint | ❌ No | HF_ENDPOINT env var configurable, not attested |
 | Operator log access | ❌ No | compose-manager /compose/logs returns raw container output |
-| .decrypted-env secrets | ❌ No | Plaintext on host-shared folder, readable by host |
 | Runtime model switching | ❌ No | Operator can call /compose/up with different model YAML |
+| Platform TCB | ⚠️ Outdated | ~80% of requests hit OutOfDate TCB (INTEL-SA-01036 et al) |
 
 ---
 
@@ -32,250 +37,239 @@
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│  cloud-api CVM  (Intel TDX)                                                    │
-│  Repo: nearai/cloud-api (Rust/Axum)                                            │
+│  cloud-api CVM  (Intel TDX)                  nearai/cloud-api                  │
 │  Attested: gateway_attestation in /v1/attestation/report                       │
 │                                                                                 │
-│  MODEL_DISCOVERY_SERVER_URL (runtime env var, NOT in compose)                  │
+│  MODEL_DISCOVERY_SERVER_URL (runtime env var)                                  │
 │  → polls every 5min, creates VLlmProvider per backend                          │
-│  → probes attestation at discovery time                                        │
+│  → probes /v1/attestation/report at discovery time — NO verification           │
 │  → routes chat/completions to provider pool                                    │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
-                                HTTP (or HTTPS, depends on discovery base_url)
+                                HTTP / HTTPS
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │  Backend CVM  (Intel TDX + NVIDIA GPU TEE)                                     │
 │                                                                                 │
 │  BOOT COMPOSE (attested in mr_config / RTMR3):                                │
-│  ├── compose-manager (nearai/compose-manager, Rust)                            │
-│  │   Source: github.com/nearai/compose-manager                                 │
-│  │   Config: GITHUB_REPO=nearai/cvm-compose-files                             │
-│  │   API: /compose/up, /compose/down, /compose/logs, /docker/*                │
+│  ├── compose-manager  nearai/compose-manager                                   │
+│  │   API: /compose/up, /compose/down, /compose/logs                            │
 │  │   Auth: BEARER_TOKEN (operator-controlled)                                  │
-│  │   Port: 8080 (not exposed through nginx or cloud-api)                      │
-│  │   Has own /v1/attestation/report with deployment action history             │
 │  │   ⚠ Does NOT call emit_event — inner compose NOT measured in RTMR3         │
-│  ├── certbot/dns-cloudflare (TLS cert management)                             │
-│  └── datadog-agent (DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true)                │
+│  ├── certbot/dns-cloudflare                                                    │
+│  └── datadog-agent  (DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true)               │
 │                                                                                 │
-│  INNER COMPOSE (pulled by compose-manager from GitHub, NOT attested):          │
-│  ├── nginx (TLS termination, routes to inference-proxy:8000)                   │
-│  ├── inference-proxy (nearaidev/vllm-proxy-rs, pinned @sha256)                │
-│  │   Source: nearai/inference-proxy (Rust)                                     │
-│  │   Signs: "{model_name}:{sha256_request}:{sha256_response}"                 │
-│  │   Keys: dstack KMS derived, ECDSA + Ed25519                                │
-│  │   Attestation: TDX quote + NVIDIA GPU evidence                             │
-│  │   NO model weight verification                                              │
-│  ├── vllm-openai (pinned @sha256, downloads model from HuggingFace)           │
-│  │   Model: specified in compose command arg (e.g. deepseek-ai/DeepSeek-V3.1) │
-│  │   Weights: cached in named Docker volume (persistent, pre-loadable)        │
-│  │   HF_ENDPOINT: not set, defaults to huggingface.co, configurable           │
-│  ├── model-proxy-registrar (self-registers with completions.near.ai)          │
-│  └── dcgm-exporter (GPU metrics)                                              │
+│  INNER COMPOSE (pulled from GitHub by compose-manager, NOT attested):          │
+│  ├── nginx (TLS termination)                                                   │
+│  ├── inference-proxy  nearai/inference-proxy                                   │
+│  │   Handles E2EE: decrypts prompts, signs responses, re-encrypts to client   │
+│  │   Keys: SECP256K1 + Ed25519 from dstack KMS                                │
+│  │   Attestation report: TDX quote + NVIDIA GPU evidence                      │
+│  │   ⚠ Code not in RTMR3 — E2EE decryption runs in unattested container      │
+│  ├── vllm-openai  (downloads model weights from HuggingFace by name)          │
+│  ├── model-proxy-registrar                                                     │
+│  └── dcgm-exporter                                                             │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Deployment Info
+## Findings by Repo
 
-| Service | Image | Pinned? |
-|---------|-------|---------|
-| compose-manager | `nearaidev/compose-manager@sha256:a3c6e22...` | ✅ By digest in boot compose |
-| inference-proxy | `nearaidev/vllm-proxy-rs@sha256:4f6024b...` | ✅ By digest in inner compose |
-| vllm-openai | `vllm/vllm-openai@sha256:0dc46f7...` (v0.17.1) | ✅ By digest in inner compose |
-| nginx | `nginx@sha256:1d13701...` | ✅ By digest in inner compose |
-| datadog-agent | `datadog/agent@sha256:5556fb8...` | ✅ By digest in boot compose |
-| certbot | `certbot/dns-cloudflare@sha256:742dbd2...` | ✅ By digest in boot compose |
+### nearai/cloud-api
+
+**Routing gap — signing keys are TOFU (Critical)**
+
+`cloud-api` probes each backend's `/v1/attestation/report` at discovery time but performs zero cryptographic verification. `get_attestation_report()` sends an HTTP GET, parses JSON, and returns it. `signing_public_key` is read directly from the unverified response and stored as the E2EE key. Any backend that returns plausible JSON is accepted into the provider pool.
+
+`_has_valid_attestation` — the return value of the attestation check — is assigned to `_` (discarded) at [`inference_provider_pool/mod.rs:1371`](https://github.com/nearai/cloud-api/blob/2cb48d2c54da/crates/services/src/inference_provider_pool/mod.rs#L1371). A backend that fails attestation entirely is still added to the pool.
+
+This is the root of the TOFU problem: `MODEL_DISCOVERY_SERVER_URL` is a runtime env var, the operator controls which backends receive requests, and the signing keys those backends advertise are accepted without verification. A malicious backend can claim any public key. Prompts "encrypted" to that key are readable by the backend.
+
+Source: [`vllm/mod.rs:307-376`](https://github.com/nearai/cloud-api/blob/2cb48d2c54da/crates/inference_providers/src/vllm/mod.rs#L307-L376), [`inference_provider_pool/mod.rs:244-289`](https://github.com/nearai/cloud-api/blob/2cb48d2c54da/crates/services/src/inference_provider_pool/mod.rs#L244-L289)
+
+[Issue #224](https://github.com/nearai/cloud-api/issues/224) (open since Dec 2025): "cloud-api should verify the attestation quotes from the models and only add the verified model nodes."
 
 ---
 
-## Data Flow Analysis
+### nearai/inference-proxy
 
-### 1. TLS Termination (VERIFIED ✅)
+**E2EE mechanism — correct design, unattested code**
 
-TLS terminates inside the CVM via nginx. Certificates managed by certbot with Cloudflare DNS-01 challenge. inference-proxy computes SPKI hash of the TLS cert and includes it in attestation report_data when `include_tls_fingerprint=true`.
+inference-proxy implements E2EE correctly in design. Each model CVM generates a SECP256K1 keypair at boot via dstack KMS. The public key is published in the attestation report as `signing_public_key`. The Ethereum address (`keccak256(pubkey)[12:]`) is embedded in `report_data[0:32]`, binding the key to the TDX quote.
 
+The encryption scheme is ECIES on SECP256K1:
+- Client generates an ephemeral keypair per request
+- Encrypts each message: `eph_pubkey(65) || nonce(12) || AES-GCM(HKDF-SHA256(ECDH(eph_priv, model_pub)))`
+- Sends headers: `X-Signing-Algo: ecdsa`, `X-Client-Pub-Key: <hex>`, `X-Model-Pub-Key: <hex>`
+- inference-proxy decrypts with its private key, runs the prompt through vLLM, encrypts the response to the client's ephemeral key
+
+`report_data` layout:
 ```
-report_data = [SHA256(signing_address || cert_fingerprint)][nonce]
+[0:32]  = SHA256(signing_address_bytes || tls_cert_fingerprint_bytes)   (gateway)
+        = signing_address padded to 32 bytes                             (model)
+[32:64] = raw nonce bytes
 ```
 
-Source: `inference-proxy/src/attestation.rs:472-493`
+Source: `src/attestation.rs:472-493`, `src/signing.rs`
 
-Host sees only encrypted TLS traffic. TDX memory encryption prevents host from reading plaintext.
+**The gap:** inference-proxy is in the inner compose, deployed post-boot by compose-manager. The TDX quote from the model CVM attests to the boot compose (compose-manager + certbot + datadog) — not to inference-proxy. A client who verifies the TDX quote and encrypts to the hardware-bound key has verified that *compose-manager* is running on real hardware. The code that *decrypts their prompt* is unattested.
 
-### 2. Attestation Chain (PARTIALLY VERIFIED ⚠️)
+**GPU attestation — design correct, live status failing**
 
-**What's measured (boot compose → RTMR3):**
-- compose-hash event: SHA256 of boot app-compose.json
-- app-id event: first 20 bytes of compose hash
-- instance-id, key-provider events
-- Measured at: `dstack-util/src/system_setup.rs:1314-1318`
+GPU evidence collected via `cc_admin.collect_gpu_evidence_remote()`. Same nonce used for both TDX quote and GPU evidence (temporal binding). Verified via NVIDIA NRAS at `nras.attestation.nvidia.com/v3/attest/gpu`.
 
-**What's NOT measured (inner compose):**
-- compose-manager deploys vllm + inference-proxy AFTER boot
-- compose-manager does NOT call `emit_event()` (confirmed: only dstack RPC is `GetQuote`)
-- dstack's `emit_runtime_event` API IS available post-boot and unrestricted
-- dstack's `verify_tdx()` DOES replay all events including post-boot (`None` stop point)
-- **The infrastructure to close this gap exists — compose-manager just doesn't use it**
+As of April 2026 live testing, NRAS is returning a boolean `False` verdict — not `"PASS"` — persistently across multiple requests and retry attempts. Root cause unknown; likely a backend enrollment or certificate issue on NEAR AI's side. Official verifiers either skip GPU attestation or treat FAIL as non-fatal, masking this.
 
-Source: `compose-manager/src/main.rs` — only 2 dstack calls, both `get_quote`
+Source: `src/attestation.rs:725-802`, `gpu_evidence_worker.py`
 
-### 3. NVIDIA GPU Attestation (VERIFIED ✅)
+---
 
-GPU evidence collected locally via `cc_admin.collect_gpu_evidence_remote()` (persistent Python subprocess).
-Same nonce used for both TDX quote and GPU evidence (temporal binding).
-GPU attestation verified via NVIDIA NRAS at `nras.attestation.nvidia.com/v3/attest/gpu`.
+### nearai/compose-manager
 
-Binding is indirect: TDX proves specific code is running → that code collects local GPU evidence → therefore GPU evidence is from this machine. No direct hardware-level CPU↔GPU cryptographic binding.
+**Inner compose not in RTMR3 (Critical)**
 
-Source: `inference-proxy/src/attestation.rs:725-802`, `gpu_evidence_worker.py`
+compose-manager deploys vllm + inference-proxy after boot via `/compose/up`. It does not call `emit_event()` to extend RTMR3 with the inner compose hash. The only dstack RPCs it makes are `get_quote` calls.
 
-### 4. cloud-api → Backend Routing (NOT VERIFIED ❌)
+The infrastructure to close this gap exists: dstack's `emit_runtime_event` API is available post-boot and unrestricted, and `verify_tdx()` replays all events including post-boot ones. compose-manager just doesn't use it.
 
-`MODEL_DISCOVERY_SERVER_URL` is a runtime environment variable. cloud-api polls it every 5 minutes for `{IP:PORT → model_name}` mappings. Probes attestation at discovery time but does not re-verify per request.
+Source: `src/main.rs` — search for dstack socket calls; only `GetQuote` present.
 
-Source: `cloud-api/crates/services/src/inference_provider_pool/mod.rs:305-333`
+**Operator exfiltration via /compose/logs (Critical)**
 
-### 5. Model Identity (NOT VERIFIED ❌)
+`POST /compose/logs` returns raw `docker compose logs` output for any container. No filtering. Only gate is BEARER_TOKEN, which is operator-controlled. If any container logs request/response content, the operator receives it via this endpoint.
 
-- vLLM downloads weights from HuggingFace by model name (e.g. `deepseek-ai/DeepSeek-V3.1`)
-- `HF_ENDPOINT` env var not set in compose, defaults to `https://huggingface.co`, configurable by operator
-- HuggingFace hub library does NOT auto-verify SHA256 (huggingface_hub issue #2364)
-- Named Docker volume `hugginface_cache` is persistent — operator could pre-load weights
-- No model revision pinning (git commit hash) in any compose file
-- inference-proxy confirmed: zero weight verification code
+Mitigations in place: inference-proxy logs only status codes (not content), `sanitize_validation_errors()` strips input from backend errors, vLLM set to `VLLM_LOGGING_LEVEL=WARNING`. These reduce risk but are not cryptographic guarantees.
 
-Source: `cvm-compose-files/DeepSeek-V3.1.yaml:93-110`
+Source: `src/main.rs:813-832`
 
-### 6. Runtime Model Switching (NOT PREVENTED ❌)
+**Runtime model switching (Critical)**
 
-Operator (holding BEARER_TOKEN) can:
-1. `POST /compose/down` — stop current model containers
-2. `POST /compose/up` with different `file` (e.g. switch from DeepSeek to Qwen YAML)
-3. New containers start with different MODEL_NAME, different vLLM model
-4. RTMR3 unchanged — boot compose didn't change
+Operator can `POST /compose/down` then `POST /compose/up` with a different YAML file to swap the running model. RTMR3 is unchanged — the boot compose didn't change. MIN_TAG_AGE_HOURS=2 prevents using freshly-created tags but all existing tags pass.
 
-Validation: MIN_TAG_AGE_HOURS=2 (must use git tags ≥2 hours old). All current tags pass.
-No auto-deploy on startup — compose-manager starts empty, waits for API calls.
+Source: `src/main.rs:663-746`
 
-Source: `compose-manager/src/main.rs:663-746` (compose_up handler)
+---
+
+### nearai/cvm-compose-files
+
+**Model weight identity not verified**
+
+vLLM downloads weights from HuggingFace by model name only (e.g. `deepseek-ai/DeepSeek-V3.1`). No revision pinning, no checksum verification. `HF_ENDPOINT` is not set in compose files, defaulting to `huggingface.co` but configurable by operator. Named Docker volume `huggingface_cache` is persistent — weights could be pre-loaded by the operator.
+
+HuggingFace hub library does not auto-verify SHA256 (huggingface_hub issue #2364). inference-proxy has zero weight verification code.
+
+Source: `DeepSeek-V3.1.yaml:93-110`
+
+---
+
+### nearai-cloud-verifier (near-examples/nearai-cloud-verification-example)
+
+**E2EE key accepted without model TDX verification**
+
+`encrypted_chat_verifier.py::fetch_model_public_key` fetches `/v1/attestation/report` and reads `signing_public_key` directly from the JSON response — without calling `check_tdx_quote` on the model attestation. The ECIES implementation (`encrypted_chat_verifier.py`) is correct; the trust chain establishing the key is not.
+
+A gateway that controls the JSON response can substitute any public key. Prompts encrypted to that key are readable by the gateway. This is TOFU at the client layer, compounding the server-side TOFU in cloud-api.
+
+---
+
+### private-ai-verifier (Phala-Network/private-ai-verifier)
+
+**Full TDX verification but no E2EE**
+
+`NearAICloudVerifier` correctly runs the full dstack verification chain — TDX quote, GPU, compose hash, report_data — for both gateway and model attestations. This is the correct approach for establishing trust in the hardware.
+
+But it never reads `signing_public_key` from `model_attestations` and has no E2EE implementation. An audit based solely on this SDK establishes that the TEE is real but does nothing to protect prompt confidentiality in transit.
+
+---
+
+## Client-Side Verification Chain
+
+For a client to establish genuine E2EE, it must verify the following before trusting the signing key. Each step eliminates one class of attack:
+
+| Step | Eliminates |
+|------|-----------|
+| 1. Gateway TDX quote | Fake gateway (no real TDX) |
+| 2. Gateway report_data | Replayed attestation; gateway not bound to this TLS cert |
+| 3. TLS cert match | TDX enclave ≠ server answering this HTTPS connection |
+| 4. Model TDX quote | Gateway substituting fake model attestation |
+| 5. Model report_data | Model attestation not bound to this request nonce |
+| 6. GPU attestation | Model running on non-CC GPU |
+| 7. Key → address binding | Gateway substituting a fake signing_public_key |
+| 8. Compose hash | Model CVM running different image than reported |
+
+**Step 7 in code:**
+```python
+from eth_keys.datatypes import PublicKey
+derived = "0x" + PublicKey(bytes.fromhex(signing_public_key)).to_canonical_address().hex()
+assert derived.lower() == signing_address.lower()
+```
+
+**Residual gap after all 8 steps:** Steps 4–8 verify the boot compose measurement. inference-proxy (the code that decrypts the prompt) is in the inner compose and is not covered by that measurement. See the compose-manager section above.
+
+A reference implementation of all 8 steps is in `hermes-agent` (`feat/near-ai-attestation` branch, `hermes_cli/attestation.py` + `hermes_cli/e2ee_proxy.py`).
+
+---
+
+## Live Findings (April 2026)
+
+**OutOfDate platform TCB**
+~80% of requests hit platforms with `OutOfDate` TCB. Advisories: INTEL-SA-01036, -01079, -01099, -01103, -01111. Known firmware vulnerabilities. Official verifiers accept OutOfDate as valid.
+
+**NRAS persistent FAIL verdicts**
+GPU attestation via NRAS returns `False` (not `"PASS"`) consistently across multiple retries. A client enforcing GPU attestation as mandatory cannot complete verification. Official verifiers mask this by skipping GPU or treating FAIL as non-fatal.
 
 ---
 
 ## Privacy Analysis
 
-### Protected from cloud provider ✅
+**Protected from cloud provider ✅**
+TDX hardware guarantees CVM memory is encrypted. TLS terminates inside CVM. Signing keys derived in TEE.
 
-TDX hardware guarantees:
-- CVM memory encrypted, host cannot read
-- TLS terminates inside CVM
-- Signing keys derived in TEE via dstack KMS
+**Not protected from operator ❌**
+Operator holds BEARER_TOKEN, controls MODEL_DISCOVERY_SERVER_URL, can access `.decrypted-env` (plaintext secrets on host-shared folder), can access raw logs via /compose/logs, and can switch deployed models without changing RTMR3.
 
-### Operator exfiltration paths ❌
-
-**compose-manager /compose/logs (CRITICAL):**
-- Returns raw `docker compose logs` output for any container
-- No filtering or sanitization
-- Only gate: BEARER_TOKEN (set by operator)
-- Source: `compose-manager/src/main.rs:813-832`
-
-**.decrypted-env on host-shared folder (CRITICAL):**
-- dstack decrypts env vars and writes plaintext to `/dstack/.host-shared/.decrypted-env`
-- Host can read this — dstack docs acknowledge it
-- Contains: DD_API_KEY, BEARER_TOKEN, HUGGING_FACE_HUB_TOKEN
-- Source: `dstack/docs/security/cvm-boundaries.md:114-120`
-
-**Datadog agent (MEDIUM-HIGH):**
-- DD_LOGS_ENABLED=true, DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true
-- Collects ALL container logs, sends to operator-controlled endpoint
-- Actual risk depends on inference-proxy/vLLM logging discipline
-
-**Mitigations in place:**
-- inference-proxy logs only status codes, not content (`proxy.rs` logging analysis)
-- Has `sanitize_validation_errors()` to strip input/ctx from backend errors
-- cloud-api CLAUDE.md has strict "never log customer data" policy
-- vLLM set to VLLM_LOGGING_LEVEL=WARNING in all compose files
-
-**Key trust boundary:** dstack protects from cloud provider (hardware), NOT from operator (software). The operator (NEAR) deployed the compose, set the env vars, holds the BEARER_TOKEN.
-
----
-
-## Concerns Summary
-
-### Critical Gaps
-
-1. **Inner compose not in RTMR3** — the actual model and proxy containers are deployed post-boot and unmeasured. compose-manager tracks deployment actions in memory but doesn't emit_event to extend RTMR3.
-
-2. **Operator can exfiltrate via /compose/logs** — raw container log access with only BEARER_TOKEN auth. If any component logs request/response content, operator gets it.
-
-3. **.decrypted-env readable by host** — plaintext secrets on shared folder. dstack design choice, not a bug.
-
-4. **Model weights unverified** — HuggingFace download by name, no checksum, configurable endpoint.
-
-5. **Runtime model switching** — operator can switch models via compose-manager API without any change to attestation.
-
-### Moderate Concerns
-
-6. **Datadog agent collects all logs** — overpermissive DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true
-
-7. **HuggingFace endpoint redirectable** — HF_ENDPOINT env var not pinned
-
-8. **compose-manager source was only recently public** — limited external review
-
-### Verified Good
-
-9. **TLS in TEE** — cert bound to attestation, host sees only ciphertext
-10. **Dual signing** — ECDSA + Ed25519, deterministic, keys from KMS
-11. **Docker images pinned by digest** — both boot and inner compose use @sha256
-12. **inference-proxy logging discipline** — does not log request/response content
-13. **NVIDIA GPU attestation** — genuine hardware, same-nonce binding to TDX
-
----
-
-## Stage Assessment
-
-Following ERC-733 / DevProof framework:
-
-**Privacy (protection from cloud provider):** Stage 1-2
-- Hardware isolation verified (TDX + GPU TEE)
-- Code identity verified for boot compose
-- TLS terminates inside TEE
-- Weakened by: Datadog agent, compose-manager /compose/logs path
-
-**Privacy (protection from operator):** Stage 0
-- Operator holds BEARER_TOKEN for compose-manager
-- Operator can access .decrypted-env
-- Operator controls MODEL_DISCOVERY_SERVER_URL
-- Operator can switch deployed models
-- Datadog sends logs to operator's endpoint
-
-**Model Identity:** Stage 0
-- Inner compose not in RTMR3
-- Model weights not checksummed
-- HuggingFace endpoint not pinned
-- Runtime model switching possible
+**Not protected via E2EE (currently) ❌**
+Even with correct client-side verification, the code that decrypts prompts (inference-proxy) is not measured in RTMR3. NRAS is failing. OutOfDate TCB on ~80% of fleet.
 
 ---
 
 ## Recommendations
 
-### Close the inner compose gap (highest impact)
-compose-manager should call `emit_event("inner-compose-hash", sha256_of_yaml)` after each `/compose/up`. dstack's `emit_runtime_event` API is unrestricted, verifiers already replay post-boot events. This is a small code change.
+**compose-manager: emit inner compose hash (highest impact)**
+Call `emit_event("inner-compose-hash", sha256_of_yaml)` after each `/compose/up`. One small code change; closes the gap between boot attestation and the code that handles decrypted prompts.
 
-### Expose compose-manager attestation
-cloud-api should forward compose-manager's `/v1/attestation/report` (which includes the deployment action history with file SHA256) to users, so they can verify what was deployed.
+**cloud-api: verify backend TDX quotes (Issue #224)**
+Run `check_tdx_quote` on each backend's attestation before accepting its signing key into the pool. The `private-ai-verifier` SDK already implements this correctly and can be called from Rust via subprocess or FFI.
 
-### Pin HuggingFace endpoint and model revision
-Set `HF_ENDPOINT=https://huggingface.co` explicitly in compose files. Pin model revisions by git commit hash instead of just model name.
+**nearai-cloud-verifier: verify model TDX quote before using signing key**
+In `fetch_model_public_key`, call `check_tdx_quote(model_attestation)` and verify `report_data` before returning `signing_public_key`. Two lines of code; closes the client-side TOFU gap.
 
-### Restrict Datadog collection
-Set `DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=false` and explicitly allowlist only known-safe log sources.
+**Fix NRAS registration for model CVMs**
+GPU attestation is failing at NRAS. Until fixed, clients enforcing GPU attestation (which they should) cannot verify the fleet.
 
-### Protect compose-manager API
-Add mTLS or stronger auth beyond BEARER_TOKEN. Rate-limit /compose/logs. Audit log all access.
+**Pin HuggingFace endpoint and model revision**
+Set `HF_ENDPOINT=https://huggingface.co` explicitly. Pin model weights by git commit hash.
+
+**Restrict Datadog and compose-manager log access**
+Set `DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=false`. Add audit logging and rate-limiting to `/compose/logs`.
+
+---
+
+## Stage Assessment
+
+**Privacy (from cloud provider):** Stage 1–2
+Hardware isolation and TLS in TEE verified. Weakened by Datadog and /compose/logs path.
+
+**Privacy (from operator):** Stage 0
+Operator controls deployment, holds secrets, can access logs.
+
+**E2EE (prompt confidentiality):** Stage 0 (currently)
+Mechanism exists and is correctly designed. Blocked by: inner compose not in RTMR3, NRAS failing, OutOfDate TCB, TOFU key in official SDK.
+
+**Model Identity:** Stage 0
+Inner compose not in RTMR3, weights unverified, runtime switching possible.
 
 ---
 
@@ -283,16 +277,16 @@ Add mTLS or stronger auth beyond BEARER_TOKEN. Rate-limit /compose/logs. Audit l
 
 | Component | Repository | Key Files |
 |-----------|-----------|-----------|
-| cloud-api | [nearai/cloud-api](https://github.com/nearai/cloud-api) | `crates/services/src/inference_provider_pool/mod.rs`, `crates/services/src/attestation/mod.rs` |
+| cloud-api | [nearai/cloud-api](https://github.com/nearai/cloud-api) | `crates/services/src/inference_provider_pool/mod.rs` |
 | inference-proxy | [nearai/inference-proxy](https://github.com/nearai/inference-proxy) | `src/attestation.rs`, `src/signing.rs`, `src/proxy.rs` |
 | compose-manager | [nearai/compose-manager](https://github.com/nearai/compose-manager) | `src/main.rs` |
-| cvm-compose-files | [nearai/cvm-compose-files](https://github.com/nearai/cvm-compose-files) | `DeepSeek-V3.1.yaml`, `small-models.yaml` |
-| private-ml-sdk | [nearai/private-ml-sdk](https://github.com/nearai/private-ml-sdk) | `vllm-proxy/` (Python, superseded by inference-proxy) |
-| dstack | [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) | `dstack-attest/src/attestation.rs`, `guest-agent/src/rpc_service.rs` |
-| verification example | [near-examples/nearai-cloud-verification-example](https://github.com/near-examples/nearai-cloud-verification-example) | `app.js`, `utils/` |
+| cvm-compose-files | [nearai/cvm-compose-files](https://github.com/nearai/cvm-compose-files) | `DeepSeek-V3.1.yaml` |
+| nearai-cloud-verifier | [near-examples/nearai-cloud-verification-example](https://github.com/near-examples/nearai-cloud-verification-example) | `encrypted_chat_verifier.py`, `model_verifier.py` |
+| private-ai-verifier | [Phala-Network/private-ai-verifier](https://github.com/Phala-Network/private-ai-verifier) | `nearai_verifier.py` |
+| dstack | [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) | `dstack-attest/src/attestation.rs` |
+| reference E2EE impl | hermes-agent `feat/near-ai-attestation` | `hermes_cli/attestation.py`, `hermes_cli/e2ee_proxy.py` |
 
 ## Prior Art
 
 - NEAR Private Chat audit: `case-studies/near-private-chat/DEVPROOF-REPORT.md` (2026-01-09)
 - Model weight gap first raised: https://x.com/socrates1024/status/1953135192769724843 (2025-08-06)
-- Phala co-founder acknowledged the gap in the same thread
