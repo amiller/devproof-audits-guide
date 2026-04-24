@@ -49,6 +49,8 @@ See [framework/STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) for detaile
 | [tee-totalled](case-studies/tee-totalled/) | 0 | `LLM_BASE_URL` operator-configurable (exfiltration) |
 | [tokscope-xordi](case-studies/tokscope-xordi/) | 0 | v1.1.2: images public, repro builds improved; still `${VAR}` image refs, Pha KMS |
 | [confer.to](case-studies/confer/) | 0 | Analysis in progress |
+| [venice-private-inference](case-studies/venice-private-inference/) | 0 | ECIES wire protocol works; `veniceai/skills` misnames it "HPKE/Noise", omits every TDX-verification step |
+| [phala-private-ai-verifier](case-studies/phala-private-ai-verifier/) | 0 | Attestation-only SDK; no E2EE code, `signing_public_key` never read, "verified" is not confidentiality |
 | [xordi-toy-example](case-studies/xordi-toy-example/) | **1** | Reference implementation with Base KMS |
 
 ## Common Failures
