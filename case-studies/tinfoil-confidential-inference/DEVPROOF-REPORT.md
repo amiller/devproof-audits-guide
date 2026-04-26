@@ -13,26 +13,53 @@
 
 ## Executive Summary
 
-| Capability | Status | Notes |
-|-----------|--------|-------|
-| Hardware-rooted attestation (AMD SEV-SNP) | ✅ Yes | Local `dcap-qvl`-equivalent (`google/go-sev-guest`); AMD VCEK chain embedded; KDS reached via `kds-proxy.tinfoil.sh` |
-| Code measurement reproducibility | ✅ Yes | Sigstore-signed in-toto statement for `tinfoilsh/confidential-model-router` releases; predicate carries the full `/config.yml` and `cmdline` |
-| Container image integrity | ✅ Yes | Production config pins by `@sha256:` digest |
-| Model weight integrity | ✅ Yes | Each model is mounted via `dm-verity` with a rootHash declared in the *attested* config |
-| OS rootfs integrity | ✅ Yes | `roothash=` parameter in attested kernel cmdline |
-| Model weight integrity | ✅ Yes | dm-verity rootHash in attested `/config.yml`; HF repo + git commit pin alongside; runtime reads enforced byte-by-byte. See "Model weight integrity" section. |
-| Live TLS pubkey binding | ✅ Yes | `report_data[0:32] == sha256(SPKI)`; bundle's `enclaveCert` SANs encode HPKE pubkey + att-doc hash |
-| HPKE pubkey attested in `report_data` | ✅ Yes | `report_data[32:64]`, also encoded in cert SANs (dcode format) |
-| Debug-mode flag enforcement | ✅ Yes | SNP guest policy bit 19 checked |
-| **Runtime config fully attested** | ❌ **No — operator-controllable surface** | Container `env` entries declared as bare strings, and all `secrets`, are read from a separate **unmeasured** disk (`tinfoil-ext-config`). See finding below. |
-| Runtime composition extension to RTMRs | ❌ Not done | `RTMR3` is hard-required to be all-zeros; nothing post-boot is measured |
-| Live GPU attestation per request | ❌ No | GPU is verified at boot inside the CVM (NVIDIA `local-gpu-verifier`), not on the wire to clients |
-| Per-request client nonce in `report_data` | ❌ No | `report_data` layout is fixed (TLS pubkey hash ‖ HPKE pubkey); no nonce slot |
-| VCEK chain → AMD Genoa root | ⚠️ Partial in our re-verifier | The Go reference verifier checks the chain; our Python re-verifier defers this in v1 |
+### Bottom line — can Tinfoil read your prompts?
 
-**Verdict.** Tinfoil's attestation surface is the strongest in this registry on most measurement-and-code-integrity dimensions. **The remaining backdoor surface is a runtime-config disk** that is read at boot but is *not* covered by the SEV launch measurement. Whether this matters for any given Tinfoil deployment depends on which env vars the deployment declares as externally sourced — the schema makes that visible in the attested `/config.yml`, so an auditor can enumerate the slots.
+**No, not on the live managed-inference deployment, *if* your client actually runs the verifier.** The prompt path is:
 
-**Per-enclave audit results (2026-04-26).** The model-router at `inference.tinfoil.sh` is *not* the same enclave as the model-serving CVM. It proxies to per-model enclaves that each have their own attested deployment under a per-model repo. Each one was audited separately:
+```
+your client
+  └─ HPKE-encrypts prompt to a pubkey bound (in the SEV report) to the attested enclave
+  └─ TLS pinned to the cert whose SPKI hash is in report_data[0:32]
+  └─ router CVM (config sha256 in launch-measured kernel cmdline; image @sha256-pinned)
+  └─ model CVM (config measured the same way; ZERO string-form env, ZERO secrets;
+                 weights dm-verity-anchored, traceable to a HuggingFace commit hash)
+  └─ vLLM running pinned weights, no operator-tunable runtime config
+```
+
+There is no point in that chain where Tinfoil's operator can read or alter your prompt without breaking the SEV launch measurement (Sigstore won't sign for it), the dm-verity Merkle tree (would EIO at page mmap), or the TLS pin (your client wouldn't connect).
+
+**The dominant practical risk is not on this case study's list at all** — it's whether the client actually runs the verification. A naive `openai.OpenAI(base_url="https://inference.tinfoil.sh/v1", api_key=...)` client doesn't; it just trusts whatever cert TLS hands it. Same backdoor exists for every TEE provider.
+
+### What is proven (✅)
+
+| Layer | Mechanism |
+|---|---|
+| Hardware attestation | AMD SEV-SNP, parsed by `google/go-sev-guest`, VCEK chain to AMD's Genoa root (in Tinfoil's reference Go verifier) |
+| Code measurement reproducibility | Sigstore-signed in-toto statement on each release; predicate carries the full attested `/config.yml` and kernel `cmdline`, both reproducible from public artifacts |
+| Container image integrity | Production configs pin by `@sha256:` digest |
+| **Model weight integrity** | dm-verity Merkle root in attested config **+** HF `repo@commit` pin alongside; tampered bytes → EIO at page mmap. **Strongest in this registry.** |
+| OS rootfs integrity | dm-verity `roothash=` in attested kernel cmdline |
+| Live TLS pubkey binding | `report_data[0:32] == sha256(SPKI)` of the live cert; cert SANs also encode the HPKE pubkey + att-doc hash |
+| HPKE pubkey attested | `report_data[32:64]`, also encoded in cert SANs |
+| Debug-mode disabled | SNP guest policy bit 19 checked |
+| Runtime config of model enclaves fully attested | Live audit: gpt-oss-120b, llama3-3-70b, gemma4-31b each have **0** string-form env entries and **0** `secrets:` |
+
+### What is NOT verified — and what each "no" actually means
+
+Different rows. They don't all mean the same thing. **None of them, on the current managed-inference deployment, let Tinfoil read your prompt.**
+
+| Row | What it actually means | Reads prompts? |
+|---|---|:---:|
+| Runtime config fully attested *(router layer only)* | Schema-level. Boot reads a second disk (`tinfoil-ext-config`) that isn't in the launch measurement. **On the live deployment**, only the router has unattested slots (`DOMAIN`, `USAGE_REPORTER_SECRET`); a code trace through `main.go` and `billing/events.go` shows both are off the prompt path. The model enclaves that actually decrypt prompts have zero unattested slots. The schema *would permit* a future deployment to declare a prompt-path env var this way — that's the structural worry. | **No** |
+| RTMR runtime composition | Tinfoil doesn't extend post-boot measurements into RTMR3 (dstack does). They don't need to: rootfs verity hash and config sha256 are *already* in the launch measurement, and nothing post-boot is supposed to change behavior. | **No** — feature unused, not gap |
+| Live GPU attestation per request | GPU is verified at boot inside the CVM by NVIDIA's `local-gpu-verifier`; the boot aborts if it fails. NEAR/Phala/Venice expose a fresh NRAS token per request as freshness evidence; Tinfoil's design relies on boot-time validation. | **No** — CPU-resident TEE protects prompt confidentiality; GPU question is about output correctness |
+| Per-request client nonce in `report_data` | Layout is fixed at `sha256(TLS pubkey) ‖ HPKE pubkey`; no nonce slot. Tinfoil gets freshness via the live TLS pin (your client opens a connection and sees the SEV-bound cert) instead. | **No** — alternative freshness mechanism |
+| VCEK chain → AMD root *(our re-verifier)* | Tinfoil's reference Go verifier walks the chain. Our Python re-verifier defers it (v1). | **No** — limitation in our tool, not Tinfoil's |
+
+### Per-enclave audit results (live, 2026-04-26)
+
+The model-router at `inference.tinfoil.sh` is **not** the same enclave as the model-serving CVM. The router proxies to per-model enclaves with their own deployments, each Sigstore-signed under a per-model repo. Each one was audited separately:
 
 | Enclave | Host | Repo | External env | External secrets |
 |---|---|---|---:|---:|
@@ -43,14 +70,18 @@
 | deepseek-v4-pro | `deepseek-v4-pro.tinfoil.containers.tinfoil.dev` | `confidential-deepseek-v4-pro` | — *(TLS EOF — unreachable)* | — |
 | kimi-k2-6 | `kimi-k2-6.tinfoil.containers.tinfoil.dev` | `confidential-kimi-k2-6` | — *(TLS EOF — unreachable)* | — |
 
-**The unattested-config surface is router-only.** The CVMs that actually decrypt and process user prompts (the per-model enclaves) declare zero string-form env entries and zero `secrets:` in their attested configs. They run a single container — typically vLLM, image pinned by `@sha256:` — with all env vars hardcoded into the signed `/config.yml`. The router does have `DOMAIN` + `USAGE_REPORTER_SECRET` as operator-controllable, but a code trace through [`confidential-model-router/main.go`](https://github.com/tinfoilsh/confidential-model-router/blob/main/main.go) establishes that neither slot is on the prompt path:
+**The unattested-config surface is router-only.** The CVMs that actually decrypt and process user prompts (the per-model enclaves) declare zero string-form env entries and zero `secrets:` in their attested configs. They run a single container — typically vLLM, image pinned by `@sha256:` — with all env vars hardcoded into the signed `/config.yml`. The router has `DOMAIN` + `USAGE_REPORTER_SECRET` as operator-controllable, but a code trace through [`confidential-model-router/main.go`](https://github.com/tinfoilsh/confidential-model-router/blob/main/main.go) establishes neither is on the prompt path:
 
-- `DOMAIN` is consumed exactly once, in `parseModelFromSubdomain` ([`main.go:120-146`](https://github.com/tinfoilsh/confidential-model-router/blob/main/main.go#L120-L146)). It's a host-suffix filter for routing model names from `<model>.<domain>` requests. Operator changes to `DOMAIN` either fall through to body-based routing or produce 404s — they cannot redirect ciphertext (TLS pin is to the SEV-bound SPKI, independent of `DOMAIN`) and cannot select a malicious upstream (model→enclave URLs come from the *attested* router config, not from this env var).
-- `USAGE_REPORTER_SECRET` flows into `billing.NewCollector` ([`billing/events.go:54-71`](https://github.com/tinfoilsh/confidential-model-router/blob/main/billing/events.go#L54-L71)) and HMACs outbound usage reports to `controlPlaneURL + "/api/internal/usage-reports"`. `controlPlaneURL` is *attested* (`CONTROL_PLANE_URL: "https://api.tinfoil.sh"`), so reports cannot be redirected. The report payload ([`events.go:88-106`](https://github.com/tinfoilsh/confidential-model-router/blob/main/billing/events.go#L88-L106)) is `{request_id, timestamp, api_key, input_tokens, output_tokens, model, route, streaming, enclave}` — billing metadata only, no prompt content. The secret is HMAC-only; it cannot decrypt anything or sign anything user-facing.
+- **`DOMAIN`** is consumed exactly once, in `parseModelFromSubdomain` ([`main.go:120-146`](https://github.com/tinfoilsh/confidential-model-router/blob/main/main.go#L120-L146)). It's a host-suffix filter for routing model names from `<model>.<domain>` requests. Operator changes to `DOMAIN` either fall through to body-based routing or produce 404s — cannot redirect ciphertext (TLS pin is to the SEV-bound SPKI, independent of `DOMAIN`) and cannot select a malicious upstream (model→enclave URLs come from the *attested* router config, not from this env var).
+- **`USAGE_REPORTER_SECRET`** flows into `billing.NewCollector` ([`billing/events.go:54-71`](https://github.com/tinfoilsh/confidential-model-router/blob/main/billing/events.go#L54-L71)) and HMACs outbound usage reports to `controlPlaneURL + "/api/internal/usage-reports"`. `controlPlaneURL` is *attested* (`CONTROL_PLANE_URL: "https://api.tinfoil.sh"`), so reports cannot be redirected. The report payload ([`events.go:88-106`](https://github.com/tinfoilsh/confidential-model-router/blob/main/billing/events.go#L88-L106)) is `{request_id, timestamp, api_key, input_tokens, output_tokens, model, route, streaming, enclave}` — billing metadata only, no prompt content. The secret is HMAC-only; it cannot decrypt anything or sign anything user-facing.
 
-So the router's two operator-controllable knobs are a routing-suffix filter and a billing-HMAC secret. Both can be used for self-DOS or to disrupt Tinfoil-internal accounting. Neither is a path to user-prompt exfiltration on this specific deployment.
+The router's two operator-controllable knobs are a routing-suffix filter and a billing-HMAC secret. Both can be used for self-DOS or to disrupt Tinfoil-internal accounting. Neither is a path to user-prompt exfiltration on this deployment.
 
-**Caveat.** Two model enclaves (`deepseek-v4-pro`, `kimi-k2-6`) returned TLS EOF during the audit window — direct probes failed before any TLS handshake completed, on a flat resolved IP. Whether they're transiently down, behind some access control, or only reachable via the router proxy is unclear from the outside. The router's catalog still lists them as live; chat completions through `inference.tinfoil.sh` for those models presumably succeed via internal routing. The point: **the audit framework correctly distinguishes "verified" from "unverifiable from outside" rather than flattening the latter into a passing checkbox.**
+### What actually matters for "are my prompts safe"
+
+1. **Use the verifier.** Either Tinfoil's [SDK](https://github.com/tinfoilsh/tinfoil-go) or our Python [re-verifier](https://github.com/amiller/awesome-private-inference/blob/main/verifiers/tinfoil.py). A bare OpenAI-compatible client without verification gets you the same posture as any non-TEE HTTPS API. **This is the dominant practical risk across all TEE providers.**
+2. **Trust in Tinfoil's CI.** Tinfoil's GitHub Actions builds the dm-verity images and produces the Sigstore signatures. The pipeline is open-source; anyone with the disk space can pull HF weights at the pinned commit, rebuild, and check the rootHash matches.
+3. **Two unaudited model enclaves.** `deepseek-v4-pro` and `kimi-k2-6` returned TLS EOF before handshake when probed directly — could be transient or intentional gating. Their attested configs were not audited. Routing to those models via `inference.tinfoil.sh` presumably works; we just can't independently verify their CVMs from outside.
 
 ---
 
