@@ -20,6 +20,7 @@
 | Container image integrity | ✅ Yes | Production config pins by `@sha256:` digest |
 | Model weight integrity | ✅ Yes | Each model is mounted via `dm-verity` with a rootHash declared in the *attested* config |
 | OS rootfs integrity | ✅ Yes | `roothash=` parameter in attested kernel cmdline |
+| Model weight integrity | ✅ Yes | dm-verity rootHash in attested `/config.yml`; HF repo + git commit pin alongside; runtime reads enforced byte-by-byte. See "Model weight integrity" section. |
 | Live TLS pubkey binding | ✅ Yes | `report_data[0:32] == sha256(SPKI)`; bundle's `enclaveCert` SANs encode HPKE pubkey + att-doc hash |
 | HPKE pubkey attested in `report_data` | ✅ Yes | `report_data[32:64]`, also encoded in cert SANs (dcode format) |
 | Debug-mode flag enforcement | ✅ Yes | SNP guest policy bit 19 checked |
@@ -250,6 +251,57 @@ This is the same class of problem named in [tee-totalled](../tee-totalled/DEVPRO
 
 ---
 
+## Model weight integrity
+
+This is the dimension where Tinfoil pulls cleanly ahead of every other provider in the registry. Each model enclave's attested `/config.yml` contains a `models:` section like:
+
+```yaml
+models:
+  - name: "gpt-oss-120b"
+    repo: "openai/gpt-oss-120b@b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+    mpk:  "db5daddec41a3be3b51d1f4d009fb0e9b1243c2765e2bc5121acac79ab070a72_195764056064_0eefa619-50b7-588f-a072-d405fb439d36"
+
+containers:
+  - name: "gpt-oss-120b"
+    image: "vllm/vllm-openai:v0.17.0-cu130@sha256:de06f6d78a..."
+    command: ["--model", "/tinfoil/mpk/mpk-db5daddec41a3be3b51d1f4d009fb0e9b1243c2765e2bc5121acac79ab070a72", ...]
+```
+
+Three layers of binding:
+
+1. **`mpk = <rootHash>_<size>_<uuid>`** — the dm-verity Merkle root of the weight bytes. Boot code at [`cvmimage/tinfoil/cmd/boot/models.go`](https://github.com/tinfoilsh/cvmimage/blob/main/tinfoil/cmd/boot/models.go) opens a block device by UUID and runs `veritysetup open ... <rootHash>` against it. vLLM's `--model` argument points at the resulting `/tinfoil/mpk/mpk-<rootHash>` mount. Reads go through the kernel's verity layer — **a single tampered byte produces EIO at the page mmap, not a silent wrong answer.**
+2. **`repo = "openai/gpt-oss-120b@b5c939de..."`** — HuggingFace repo + git commit hash. Provenance, not enforcement: it tells an auditor "the dm-verity image we built was built from HF repo X at git commit Y." The commit hash is content-addressed by HF's git layer.
+3. **Both fields live inside the Sigstore-signed `/config.yml`**, whose sha256 is in the SEV-launch-measured kernel cmdline (`tinfoil-config-hash=`). So the rootHash and HF pin are bound to the hardware launch, not server-asserted.
+
+What this gets you end-to-end:
+
+- ✅ Operator cannot swap weights at runtime (dm-verity enforces).
+- ✅ Operator cannot change which weights are mounted post-build (rootHash is in attested config).
+- ✅ Operator cannot silently use a different HF commit (the commit hash is part of the attested config; visible to any auditor pulling the bundle).
+- ✅ No `HF_ENDPOINT` style attack: the CVM does not reach out to HuggingFace at boot or runtime. The verity-mounted disk is built once during release CI and shipped with the deployment.
+
+Residual trust assumptions:
+
+- ⚠️ **Tinfoil's release CI correctly translated "HF repo X at commit Y" into the published rootHash.** This is reproducible — anyone can pull the HF weights at the pinned commit, run the same dm-verity build, and check the rootHash matches. We have not run that reproduction in this audit (the weights are 100s of GB per model). The pipeline is open-source and lives in the `tinfoilsh` org alongside the rest of the build chain.
+- ⚠️ **HuggingFace honestly serves the content at the pinned commit hash.** This is the same trust as any git host; HF allows force-pushes in some cases but cannot make the same commit hash address two different blobs without breaking sha256.
+
+### Comparison vs other providers in the registry
+
+| Provider | Weight integrity | Mechanism | Verifiable from outside? |
+|---|:---:|---|:---:|
+| **Tinfoil** | ✅ | dm-verity rootHash in attested config + HF repo+commit pin; enforced at every page read | reproducible from public HF content |
+| **NEAR AI** | ❌ | vLLM downloads from HF by *model name only*, no commit pin, no SHA check; persistent `huggingface_cache` Docker volume; `HF_ENDPOINT` operator-configurable ([near-ai-private-inference DEVPROOF-REPORT.md:157-161](../near-ai-private-inference/DEVPROOF-REPORT.md)) | no |
+| **Phala (Redpill `phala/*` paths)** | ❌ | inherits NEAR-AI / vLLM-from-HF pattern depending on backend shape | no |
+| **Redpill federation** | ❌ | inherits whichever backend it routes to | no |
+| **Venice** | ❌ | weights not referenced in any attestation surface | no |
+| **Chutes** | ❌ | per-instance E2EE pubkey is hardware-bound, but weights are not | no |
+
+The huggingface_hub library itself does not auto-verify SHA256 ([huggingface_hub#2364](https://github.com/huggingface/huggingface_hub/issues/2364)). Every provider that downloads at runtime by name is exposed to the same class of weight-substitution attacks NEAR AI has.
+
+The "sneakily change weights once and then back" pattern people sometimes worry about: that's prevented at the git layer for any provider that pins by commit hash (Tinfoil) and unprevented for any provider that pulls by name (everyone else in this table). HF's content-addressed storage means a maintainer cannot reuse a commit hash for different content without breaking sha256. So a Tinfoil auditor who archives the deployment's bundle today can detect any future weight tampering by re-deriving the rootHash from HF at the pinned commit.
+
+---
+
 ## What the re-verifier does
 
 [`awesome-private-inference/verifiers/tinfoil.py`](https://github.com/amiller/awesome-private-inference/blob/main/verifiers/tinfoil.py) implements an independent re-verifier in Python. The trust chain it walks:
@@ -291,7 +343,7 @@ The slots-tally is the new contribution. The Go reference confirms the launch me
 |---|---|---|
 | Compose hash committed by hardware | ❌ — server-supplied vs server-supplied (`info.compose_hash == sha256(app_compose)`) | ✅ — `tinfoil-config-hash=` in cmdline → SEV launch measurement |
 | Container image content pinned | ❌ usually tag | ✅ `@sha256:` digest in attested config |
-| Model weights integrity | ❌ | ✅ `dm-verity` rootHash declared in attested config |
+| Model weights integrity | ❌ — runtime download from HF by name | ✅ dm-verity rootHash + HF commit pin in attested config (see "Model weight integrity") |
 | Live TLS fingerprint pinned by client | ❌ | ✅ |
 | OS rootfs integrity | varies | ✅ dm-verity `roothash=` in attested cmdline |
 | RTMR runtime composition | dstack does it; Phala-private-ai-verifier does not check | ❌ Tinfoil does not extend at all (RTMR3 must be zero) |

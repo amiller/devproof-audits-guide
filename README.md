@@ -51,7 +51,7 @@ See [framework/STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) for detaile
 | [confer.to](case-studies/confer/) | 0 | Analysis in progress |
 | [venice-private-inference](case-studies/venice-private-inference/) | 0 | ECIES wire protocol works; `veniceai/skills` misnames it "HPKE/Noise", omits every TDX-verification step |
 | [phala-private-ai-verifier](case-studies/phala-private-ai-verifier/) | 0 | Attestation-only SDK; no E2EE code, `signing_public_key` never read, "verified" is not confidentiality |
-| [tinfoil-confidential-inference](case-studies/tinfoil-confidential-inference/) | ~1 | Closes the Phala/NEAR compose-hash gap (config sha256 in launch-measured cmdline). Per-model enclaves fully attested; router has 2 externally-sourced slots (`DOMAIN`, `USAGE_REPORTER_SECRET`) — code-trace-shown to be off the prompt path |
+| [tinfoil-confidential-inference](case-studies/tinfoil-confidential-inference/) | ~1 | Closes the Phala/NEAR compose-hash gap (config sha256 in launch-measured cmdline). Model weights are dm-verity-anchored with HF commit pinned in the attested config — runtime tampering produces EIO, no HF-by-name fetch like NEAR AI. Per-model enclaves fully attested; router has 2 externally-sourced slots (`DOMAIN`, `USAGE_REPORTER_SECRET`) — code-trace-shown to be off the prompt path |
 | [xordi-toy-example](case-studies/xordi-toy-example/) | **1** | Reference implementation with Base KMS |
 
 ## Common Failures
