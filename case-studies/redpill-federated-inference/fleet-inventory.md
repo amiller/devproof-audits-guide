@@ -1,29 +1,37 @@
 # Redpill `phala/*` fleet inventory — 2026-04-28
 
-Every row below has **clickable links** to the live attestation endpoint
-(returns JSON in your browser) and to the saved `app_compose` files in
-this repo. The OS image is the `vm_config.image` field of the attestation
-JSON.
+Every row below has three clickable views per model:
 
-The catalog endpoint: <https://api.red-pill.ai/v1/models> — filter to
-ids starting `phala/` to get the 21 models below.
+- **report** — live JSON from Redpill's `/v1/attestation/report?model=…`.
+  Top-level `vm_config.image` is the OS image string. Browser may render
+  raw or formatted depending on its JSON support — the field you're
+  looking for is in the first ~10 fields.
+- **proof.t16z** — third-party TDX viewer, displays the parsed quote
+  with MRTD/RTMRs/TCB. Confirms cryptographic validity. Does **not**
+  surface OS image name (that's not in the quote bytes — it's a separate
+  field we get from Redpill's wrapper).
+- **compose** — the literal `app_compose` JSON saved in this repo.
+  Application config only (services, env, allowed_envs); does **not**
+  contain the base OS image name. The OS image is set at deploy time
+  and lives in the attestation report's `vm_config`, not the compose.
+
+The OS image label (DEV vs prod) comes from the **report** column. The
+catalog endpoint listing all model ids: <https://api.red-pill.ai/v1/models>.
 
 ## Phala-simple CVMs (operated by Redpill on Phala dstack)
 
-5 distinct app_ids serving 8 models. **All 5 run dev images.** Click any
-model link → look for `"image":"dstack-nvidia-dev-…"` in the
-`vm_config` field of the JSON.
+5 distinct app_ids serving 8 models. **All 5 run dev images.**
 
-| Model | Attestation (click to see JSON) | Saved compose | OS image | dev/prod |
-|---|---|---|---|:-:|
-| `phala/gpt-oss-20b` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/gpt-oss-20b) | [`c3f19eb…`](composes/c3f19eb2a4d97aa0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
-| `phala/gemma-3-27b-it` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/gemma-3-27b-it) | [`c3f19eb…`](composes/c3f19eb2a4d97aa0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
-| `phala/glm-4.7-flash` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/glm-4.7-flash) | [`9683a8f…`](composes/9683a8f8b3d3e566.json) | `dstack-nvidia-dev-0.5.5-021bf66a` | **DEV** |
-| `phala/qwen-2.5-7b-instruct` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen-2.5-7b-instruct) | [`b303b44…`](composes/b303b44ff3bf49f0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
-| `phala/qwen2.5-vl-72b-instruct` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen2.5-vl-72b-instruct) | [`b303b44…`](composes/b303b44ff3bf49f0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
-| `phala/qwen3-vl-30b-a3b-instruct` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen3-vl-30b-a3b-instruct) | [`b303b44…`](composes/b303b44ff3bf49f0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
-| `phala/qwen3.5-27b` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen3.5-27b) | [`7ac6727…`](composes/7ac6727adb3fc9a9.json) | `dstack-nvidia-dev-0.5.6-f2e62bc7` | **DEV** |
-| `phala/uncensored-24b` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/uncensored-24b) | [`5c809c5…`](composes/5c809c592b57e6f3.json) | `dstack-nvidia-dev-0.5.5-021bf66a` | **DEV** |
+| Model | Live JSON | TDX viewer | Compose | OS image | dev/prod |
+|---|---|---|---|---|:-:|
+| `phala/gpt-oss-20b` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/gpt-oss-20b) | [proof.t16z](https://proof.t16z.com/reports/b39d6af40f1f82178d28ce97117760fcd4169ffd3e7bca6781e686a786134ff6) | [`c3f19eb…`](composes/c3f19eb2a4d97aa0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
+| `phala/gemma-3-27b-it` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/gemma-3-27b-it) | [proof.t16z](https://proof.t16z.com/reports/34937b1c579234fa8f6712c05a01b96c7154efaa85303778d24bb18df6db8e79) | [`c3f19eb…`](composes/c3f19eb2a4d97aa0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
+| `phala/glm-4.7-flash` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/glm-4.7-flash) | [proof.t16z](https://proof.t16z.com/reports/7a19fb48835cfe5fdb0ab878b802a458ce3e4e33622b327120d4ca19322fdc35) | [`9683a8f…`](composes/9683a8f8b3d3e566.json) | `dstack-nvidia-dev-0.5.5-021bf66a` | **DEV** |
+| `phala/qwen-2.5-7b-instruct` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen-2.5-7b-instruct) | [proof.t16z](https://proof.t16z.com/reports/4052d443258395131de0932931f8e6916fec3e41ef0ac1738269486a4a9f0ca1) | [`b303b44…`](composes/b303b44ff3bf49f0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
+| `phala/qwen2.5-vl-72b-instruct` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen2.5-vl-72b-instruct) | [proof.t16z](https://proof.t16z.com/reports/58a4b301aa77448927d34486d4a98a918e0321690da9cd4f8a30675ed421c39a) | [`b303b44…`](composes/b303b44ff3bf49f0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
+| `phala/qwen3-vl-30b-a3b-instruct` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen3-vl-30b-a3b-instruct) | [proof.t16z](https://proof.t16z.com/reports/bd9dd5f431b4e39b8febcf6bd3ef19a367a0942e392da22c585d85be67ae58d0) | [`b303b44…`](composes/b303b44ff3bf49f0.json) | `dstack-nvidia-dev-0.5.8-e3e677dd` | **DEV** |
+| `phala/qwen3.5-27b` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/qwen3.5-27b) | [proof.t16z](https://proof.t16z.com/reports/7f29da977ae17442b7c461ce73223ef60c2ee8dc396f118f2fa0f4b3a199eac2) | [`7ac6727…`](composes/7ac6727adb3fc9a9.json) | `dstack-nvidia-dev-0.5.6-f2e62bc7` | **DEV** |
+| `phala/uncensored-24b` | [report](https://api.red-pill.ai/v1/attestation/report?model=phala/uncensored-24b) | [proof.t16z](https://proof.t16z.com/reports/248e1650b272539854f6e5141cff9fad0c4d48ff7caa4acf56d9ab249b731632) | [`5c809c5…`](composes/5c809c592b57e6f3.json) | `dstack-nvidia-dev-0.5.5-021bf66a` | **DEV** |
 
 ## NEAR AI fleet (federated via Redpill)
 
