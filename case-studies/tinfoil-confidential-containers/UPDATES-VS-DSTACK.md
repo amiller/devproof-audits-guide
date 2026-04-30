@@ -78,6 +78,25 @@ Removing a version is symmetric. The contract is `UUPSUpgradeable` and supports 
 
 The contract owner is normally the deployer (or their multisig). They are a *separate principal* from whoever runs the CVM — even an attacker who compromises the CVM host cannot ship a new version that derives the same key, because the KMS will refuse without an `isAppAllowed=true` from the contract.
 
+### `DstackApp.sol` is one implementation of `IAppAuth` — the design space is broader
+
+The KMS calls `is_app_allowed` via a configurable webhook URL ([`upgrade_authority.rs:79-93`](https://github.com/Dstack-TEE/dstack/blob/main/kms/src/main_service/upgrade_authority.rs#L79-L93)); the webhook is backed by anything that returns `(bool isAllowed, string reason)` for an `AppBootInfo` payload. The minimum interface is in [`IAppAuth.sol:55-57`](https://github.com/Dstack-TEE/dstack/blob/main/kms/auth-eth/contracts/IAppAuth.sol#L55-L57):
+
+```solidity
+function isAppAllowed(IAppAuth.AppBootInfo calldata bootInfo)
+    external view returns (bool isAllowed, string memory reason);
+```
+
+`DstackApp.sol` (the reference implementation) is a single-owner allowlist with `addComposeHash` / `removeComposeHash`. Any contract implementing `IAppAuth` works. Real-world variations actually deployed in the dstack ecosystem:
+
+- **Timelocked upgrades** (this repo's [`dstack-replicatoor/contracts/src/UpgradeOperator.sol`](https://github.com/amiller/dstack-replicatoor/blob/main/contracts/src/UpgradeOperator.sol)): proposes a new measurement, accepts it only after a 48-hour cooldown. Trades immediate upgradeability for a notice period.
+- **Multisig-owned**: pass a Safe / Gnosis multisig as the owner of `DstackApp`. Same surface, multi-party governance.
+- **DAO-governed**: a governance contract that votes on `addComposeHash` proposals.
+- **ZK-gated**: proofs of provenance (e.g., the source repo's commit was signed by a specific key, the build was reproducible) verified on chain, no human approval step.
+- **Hybrid**: device allowlist + compose allowlist + timelock + multi-step bootstrap (see `dstack-replicatoor`).
+
+The pluggability of `IAppAuth` is the actual design hook. `DstackApp.sol` is just the simplest member of that family. **Tinfoil-Containers has no equivalent abstraction** — the trust root for "is this version allowed" is hard-wired to the GitHub Actions OIDC + Sigstore identity policy in the verifier. Replacing that policy means forking the verifier, not configuring a contract address.
+
 ---
 
 ## Source trace — Tinfoil-Containers

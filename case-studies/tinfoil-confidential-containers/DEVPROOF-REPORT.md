@@ -377,6 +377,13 @@ assert report.scorecard.runtime_config_fully_attested is False  # because of OPE
 
 ---
 
+## Companion documents
+
+- [`UPDATES-VS-DSTACK.md`](UPDATES-VS-DSTACK.md) — how update authority works in each platform; covers the broader `IAppAuth` design space (timelock, multisig, ZK-gated, replicatoor pattern).
+- [`ARCHITECTURE-VS-DSTACK.md`](ARCHITECTURE-VS-DSTACK.md) — persistence model, gateway / TLS termination, cross-CVM identity, registry support, Tinfoil's centralization map, and a path-to-web3-grade sketch.
+
+---
+
 ## Prior art
 
 - [`tinfoil-confidential-inference`](../tinfoil-confidential-inference/DEVPROOF-REPORT.md) — sister outside-in audit; runtime-config gap section there reasoned about declared slots from cvmimage source. This audit empirically confirms it.
