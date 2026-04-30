@@ -382,6 +382,7 @@ assert report.scorecard.runtime_config_fully_attested is False  # because of OPE
 - [`UPDATES-VS-DSTACK.md`](UPDATES-VS-DSTACK.md) — how update authority works in each platform; covers the broader `IAppAuth` design space (timelock, multisig, ZK-gated, replicatoor pattern).
 - [`ARCHITECTURE-VS-DSTACK.md`](ARCHITECTURE-VS-DSTACK.md) — persistence model, gateway / TLS termination, cross-CVM identity, registry support, Tinfoil's centralization map, and a path-to-web3-grade sketch.
 - [`PATTERNS-AND-USE-CASES.md`](PATTERNS-AND-USE-CASES.md) — survey of notable Tinfoil patterns (EHBP, enclave-as-anonymizer, confidential MCP, caching proxies, path allowlist), explicit platform constraints, docs gaps, and use cases worth knowing about.
+- [`STAGE-733-ANALYSIS.md`](STAGE-733-ANALYSIS.md) — full ERC-733 Stage 0/1/2 walkthrough with each requirement scored against evidence; multi-vendor / lock-in analysis covering what's swappable today.
 
 ---
 
