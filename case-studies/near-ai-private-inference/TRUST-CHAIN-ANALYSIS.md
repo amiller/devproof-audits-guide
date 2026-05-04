@@ -740,6 +740,69 @@ For the closure work this audit is producing:
   the same data. NEAR's `kmsInfo` being empty is not a verifier-side
   problem.
 
+## Threat model — what each TEE is load-bearing for
+
+The chain involves three TDs (KMS, gateway, model CVM) plus the
+on-chain registry and the user's client. The natural question
+"does TD X *need* to be in a TEE?" has different answers depending
+on what guarantee you're asking about.
+
+**Model CVM TEE — load-bearing for prompt confidentiality.**
+The user encrypts to `to_montgomery(signing_public_key)` where
+`signing_public_key` is the model CVM's Ed25519 key derived from
+`app_k256` *inside the model TD* (Links 1–4). The corresponding
+private k256 derives only inside the model TD; if the TD's
+attestation is forged or its TCB is breakable, prompt plaintext
+leaks. **No client-side check can substitute for this TEE.**
+
+**KMS TD TEE — load-bearing for key-derivation integrity.**
+Every per-app key (including the model CVM's signing seed) is
+derived from the KMS root k256, which is generated inside the
+KMS TD via `OsRng` (Link 5). If the KMS TD is breakable or its
+genesis attestation is forged, the operator can derive every per-
+model E2EE private key offline. **No client-side check can
+substitute for this TEE either** — the on-chain
+`kmsAllowedAggregatedMrs` allowlist gates *replica onboarding*
+(Link 7), not the genesis instance.
+
+**Gateway TEE — *not* load-bearing for prompt confidentiality.**
+The cloud-api gateway sees only TLS-wrapped ciphertext on the wire;
+the plaintext is encrypted to the model CVM's pubkey, not to any
+gateway-held key. A fully malicious gateway with no TEE at all
+cannot decrypt prompts. The OutOfDate gateway TCB warning we see
+in production
+(`Gateway platform TCB is OutOfDate, advisories: INTEL-SA-01036…`)
+is therefore **not a confidentiality risk for E2EE clients**. The
+gateway TEE *is* load-bearing for three other guarantees, each of
+which has a client-side substitute:
+
+| Gateway-TEE guarantee | What it protects | Client-side substitute |
+|---|---|---|
+| Server-side per-backend attestation verification (cloud-api PR #552) | Operator can't swap the verifier for a no-op that accepts unattested backends | The client runs its own per-model attestation (nearai-cloud-verifier, hermes-agent) and rejects unattested ones. Redundant once client does this. |
+| TLS endpoint binding via `report_data` | Client can prove "the TLS endpoint I'm talking to is *this* attested gateway" | Inner E2EE channel binds independently to the model CVM's pubkey. TLS becomes a transport with no confidentiality role. |
+| Request metadata privacy (API key, model name, timing) | Operator can't dump a request log of who-asked-for-what | None at this layer — metadata privacy genuinely needs the gateway TEE, but it's an **outer-channel** property, separable from prompt content. |
+
+For a client running its own per-model attestation, the gateway's
+role degrades to "transport" and an OutOfDate gateway TCB is a
+yellow flag (degrades server-side verification and TLS binding)
+rather than a red flag (would break confidentiality). For a client
+relying solely on the gateway to verify backends, the OutOfDate
+gateway TCB *is* a structural concern, since the same advisories
+that put the gateway TD at risk also put the gateway-side
+verification path at risk.
+
+**On-chain registry — not a TEE, and not strictly required.**
+The `DstackKms` / `DstackApp` contracts on Base publish the
+deployer's allowlist (registered apps, allowed compose hashes,
+allowed OS images, the canonical KMS provenance). They are an
+**automatic-update channel** for the deployer's authority, not the
+authority itself. The authority is the deployer (their EOA, build
+process, judgment about which composes to authorize). A static
+client-side `(model → app_id, compose_hash_set)` pin is the
+conservative floor; the on-chain layer is the dynamic top — the
+client should accept a compose iff it's in both. Either layer
+alone leaves a gap; their intersection closes it.
+
 ## Source-code verification status
 
 A note on the "is the source code verified?" question, since it has
