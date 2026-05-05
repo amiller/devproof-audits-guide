@@ -663,23 +663,136 @@ python -c "from verifiers.near_ai import verify; \
 
 ## Recommended next steps for NEAR
 
-1. **Set `ALLOWED_IMAGE_HASHES`** in the cloud-api compose to the dstack OS
-   image hashes the team has actually validated, and treat this as part of the
-   measured config (i.e. don't list it in `allowed_envs`). Today's value
-   would start as `da9a3d5cc196a1a76d953fb27069be428ddf60a1ce10b0534c3cf968d3053fde`.
-2. **Add `ALLOWED_COMPOSE_HASHES`** (or a per-model whitelist) and enforce it
-   in `AttestationVerifier::verify_attestation_report` symmetric to the
-   image-hash check. Source the list from the on-chain
-   `ComposeHashAdded`/`ComposeHashRemoved` events on the model CVM's
-   AppAuth contract — this also gives external auditors a single place to
-   look.
-3. **Verify the Base AppAuth contracts** for the five live app IDs.
-4. **Fix the dstack-ingress evidence-renew script** so `quote.json` is
-   regenerated alongside `cert-…pem`/`sha256sum.txt` on Let's Encrypt
-   rollover.
-5. **Drop the `MODEL_DISCOVERY_*` env entries** from the cloud-api compose
-   (pure cleanup, simplifies future audits).
-6. **Close issue #224** once (1)–(2) ship.
+Each ask below is framed in two layers: (1) the change itself, and (2) the
+*residual consequence assuming a verifying client (e.g. `hermes-agent`'s
+static-anchor mode in PR
+[NousResearch/hermes-agent#12201](https://github.com/NousResearch/hermes-agent/pull/12201))
+is already running the full closed-chain check from
+[`VERIFIER-DESIGN.md` §5](./VERIFIER-DESIGN.md) — Blocks A+B+C+D — with a
+manually-pinned anchor file*. Many gateway-side gaps moot under that model;
+what's left is what an *unpinned* client (or a generic verifier) can't anchor.
+
+### Asymmetric wins (one tx, big anchor improvement)
+
+1. **Call `setKmsInfo((k256Pubkey, caPubkey, quote, eventlog))` on
+   `DstackKms 0x8fa1593fac104c1aa0c59eaa3553f7e3e162d637`.** Phala's
+   canonical KMS at `0x2f83172A…` populates all four; NEAR's returns
+   zero-length bytes. The EOA owner already has authority for the call;
+   it only needs to happen once with the bootstrap output of the running
+   KMS instance.
+   *Consequence with pinned client:* zero — hermes pins
+   `info.key_provider_info.id` directly from the captured attestation.
+   *Without* a pin: no on-chain way to confirm the KMS root was generated
+   inside a TDX TD. "Root generated in TD with `quote_enabled=true`,
+   deployer simply forgot to publish via `setKmsInfo`" and "root generated
+   off-chain and imported into a `quote_enabled=false` KMS instance" are
+   indistinguishable from chain state, and the KMS endpoint at
+   `kms.cvm1.near.ai` is not externally reachable so the quote isn't
+   published anywhere else either.
+
+2. **Publish a signed `(model → app_id, compose_hashes, os_image_hash,
+   kms_pubkey)` manifest at a stable URL.** Phala has
+   `https://cloud-api.phala.network/api/v1/apps/{app_id}/attestations`;
+   NEAR's `cloud-api.near.ai/v1/apps/...` is `404`. A NEAR-org key signs
+   each release of the manifest.
+   *Consequence with pinned client:* zero — hermes already substitutes for
+   this with the ad-hoc anchor file we built. *Without* a manifest: every
+   other client either has to capture+pin themselves (fragmenting the
+   ecosystem) or trust the live response (no anchor at all). Externality:
+   keeps the verifier-design Block B unimplementable for any client that
+   doesn't already know NEAR's contract addresses out-of-band.
+
+### Server-side enforcement (helps path A direct users without our client)
+
+3. **Set `ALLOWED_IMAGE_HASHES`** in the cloud-api compose to the dstack OS
+   image hashes the team has actually validated, and treat this as part of
+   the measured config (i.e. don't list it in `allowed_envs`). Today's
+   value would start as `da9a3d5cc196a1a76d953fb27069be428ddf60a1ce10b0534c3cf968d3053fde`.
+   *Consequence with pinned client:* unchanged — Block B2 enforced
+   client-side. Path A direct users without our client today get ~no
+   enforcement on which OS image is serving them. Cheap server-side fix.
+
+4. **Add `ALLOWED_COMPOSE_HASHES` (or a per-model whitelist) and enforce
+   it in `AttestationVerifier::verify_attestation_report` symmetric to the
+   image-hash check.** `verification.rs` extracts `compose_hash` from the
+   RTMR3 event log and surfaces it on `VerifiedAttestation` — but never
+   compares against anything. Best implementation: source the allowlist
+   from the on-chain `ComposeHashAdded` / `ComposeHashRemoved` events on
+   the model CVM's AppAuth contract instead of an env var, which gives
+   external auditors a single place to look.
+   *Consequence with pinned client:* unchanged. *Without* a pin: this is
+   the single biggest server-side hole — any TCB-current TDX TD running
+   anything passes.
+
+5. **Enable `REQUIRE_TCB_UP_TO_DATE=1` in cloud-api.** Off by default;
+   today only `tcb_status` is logged when not `UpToDate`.
+   *Consequence with pinned client:* hermes uses `dcap_qvl` itself but
+   does not currently fail-closed on `tcb_status != UpToDate` either, so
+   an Intel TCB revocation tolerates both layers until someone fixes one
+   of them. The gateway is the operator-controlled floor — flip it on
+   there as a backstop while client-side enforcement matures.
+
+### Governance (residual trust assumption even with pinned clients)
+
+6. **Move ownership from a single EOA (`0x21e6b7ef11185eaa57c56ea9c74e48aac6e8ab8d`)
+   to a multisig or timelock-wrapped controller.** That one keypair owns
+   all six DstackApp proxies *and* `DstackKms`, with `_upgradesDisabled=false`
+   on every proxy — so it can UUPS-swap any impl, `addComposeHash`,
+   `addOsImageHash`, transfer ownership, etc.
+   `disableUpgrades()` outright is operationally untenable (would force
+   new `app_id`s on every bug fix and on every legitimate compose
+   rotation, which we already observed mid-capture for GLM-5.1 on
+   2026-05-05). Multisig or timelock is the operator-friendly variant:
+   keeps upgrade and rotation capability, but turns single-key compromise
+   into a multi-party, time-windowed event auditable in
+   `OwnershipTransferred` / `Upgraded` / `ComposeHashAdded` logs.
+   *Consequence with pinned client:* downgraded to "anchor-refresh
+   discipline." A hostile single-key compromise can't trick a pinned
+   hermes client at request time, but it can fool any future Block B
+   on-chain reader, and a determined attacker who legitimately
+   `addComposeHash`-es a poisoned compose under the EOA's signature could
+   slip into the next anchor refresh PR if the maintainer can't tell
+   apart "operator authorized" from "operator key compromised." Multisig
+   reframes that question as "is this rotation consistent with NEAR's
+   published process?" rather than "do we trust every transaction signed
+   by one EOA?"
+
+### Cleanup (low-stakes, makes future audits cleaner)
+
+7. **Verify the Base AppAuth contracts** for the five live app IDs +
+   `DstackKms` on Basescan.
+   *Consequence with pinned client:* zero functional impact — `eth_call`
+   works against the ABI regardless of source verification. Pure
+   auditability concern: blocks human review and reproducibility of any
+   third-party audit.
+
+8. **Fix the dstack-ingress evidence-renew script** so `quote.json` is
+   regenerated alongside `cert-…pem` / `sha256sum.txt` on Let's Encrypt
+   rollover. Currently 0 bytes since 2026-05-02 04:49 UTC; compose hash
+   unchanged so it's an operational regression in the renew hook.
+   *Consequence with pinned client:* zero on path B/C. Path A users
+   currently can't bind the live TLS cert fingerprint to a TDX quote — the
+   cert-content side still works but the TDX-anchored leg is missing.
+
+9. **Drop the `MODEL_DISCOVERY_*` env entries** from the cloud-api compose
+   (pure cleanup; the binary no longer reads them — only
+   `MODEL_DISCOVERY_API_KEY` survives as a fallback name for
+   `INFERENCE_API_KEY`).
+   *Consequence with pinned client:* zero. Removes a dead path so future
+   audits don't have to chase it.
+
+### Issue closure
+
+10. **Close [`nearai/cloud-api#224`](https://github.com/nearai/cloud-api/issues/224)**
+    once (3) and (4) ship. The original "cloud-api should only add
+    verified model nodes" objection is server-side compose + image
+    enforcement.
+
+Headline ordering: **`setKmsInfo` first** (most asymmetric — one tx for
+NEAR, fundamentally improves the trust story for every non-pinned client),
+then **published manifest** (unblocks generic verifiers and removes the
+out-of-band trust on contract addresses), then **server-side allowlists +
+TCB-up-to-date**, then **governance**, then cleanup.
 
 ---
 
