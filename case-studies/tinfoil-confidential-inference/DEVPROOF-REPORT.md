@@ -390,7 +390,7 @@ Tinfoil closes the compose-hash backdoor that defines the Phala/NEAR class. It i
 
 ## Stage Assessment
 
-**ERC-733 Stage:** **Stage 1.** The audit applied the [prompt-path test](../../framework/AUDIT-GUIDE.md#the-prompt-path-test) to every operator-controllable slot in the live deployment and found zero on the prompt path. Re-audit per `/config.yml` rotation; the schema permits new slots to be declared, so each new release needs the same slot-by-slot test.
+**ERC-733 Stage:** **Stage 1.** The audit applied the [prompt-path test](../../framework/AUDIT-GUIDE.md#the-prompt-path-test) to every operator-controllable slot in the live deployment and found zero on the prompt path. The inference path holds no persistent encrypted data, so §5's "withdraw before upgrades" requirement is vacuous — a verifying client rejects on any change it hasn't pinned, and there is no past data hostage to a future operator upgrade.
 
 Going through the [Stage 1 Checklist](../../README.md#stage-1-checklist):
 
