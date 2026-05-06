@@ -392,8 +392,6 @@ Tinfoil closes the compose-hash backdoor that defines the Phala/NEAR class. It i
 
 **ERC-733 Stage:** **Stage 1.** The audit applied the [prompt-path test](../../framework/AUDIT-GUIDE.md#the-prompt-path-test) to every operator-controllable slot in the live deployment and found zero on the prompt path. Re-audit per `/config.yml` rotation; the schema permits new slots to be declared, so each new release needs the same slot-by-slot test.
 
-(Earlier drafts of this report phrased the verdict as "Stage 1, *conditional on* no prompt-path entries." That wording was a hedge — every audit verdict is "conditional on the audit having been done correctly," which is tautological and not informative. The audit DID apply the test; the answer was zero; therefore Stage 1, period. The substantive operational note is "re-audit per release," not a verdict-level conditional.)
-
 Going through the [Stage 1 Checklist](../../README.md#stage-1-checklist):
 
 - [x] **Enclaves attested on-chain** — n/a here (off-chain attestation is published via Sigstore + GitHub Releases; this checkbox is the chain-anchored variant)
