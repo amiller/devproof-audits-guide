@@ -29,6 +29,8 @@ your client
 
 There is no point in that chain where Tinfoil's operator can read or alter your prompt without breaking the SEV launch measurement (Sigstore won't sign for it), the dm-verity Merkle tree (would EIO at page mmap), or the TLS pin (your client wouldn't connect).
 
+> **Terminology — "prompt-path entry."** This report uses *"prompt-path"* as a code-trace test on each operator-controllable config slot (env var or `secrets:` entry that gets its value from the unmeasured external-config disk). An entry is **on the prompt path** if a code trace shows the operator can change its value to intercept, redirect, modify, decrypt, sign, log, or exfiltrate the user's plaintext prompt or response. An entry is **off the prompt path** if no such effect exists — every read site of the value is in code that can't affect plaintext handling (e.g. the value is HMAC'd into a fixed-URL telemetry payload that contains no prompt content, or is used as a hostname filter that can't override TLS pinning to an attested SPKI). The Stage 1 conditional later in this report ("no prompt-path entries in the externally-sourced env/secret lists") is exactly this test applied to each declared slot.
+
 **The dominant practical risk is not on this case study's list at all** — it's whether the client actually runs the verification. A naive `openai.OpenAI(base_url="https://inference.tinfoil.sh/v1", api_key=...)` client doesn't; it just trusts whatever cert TLS hands it. Same backdoor exists for every TEE provider.
 
 ### What is proven (✅)
