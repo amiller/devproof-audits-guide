@@ -37,6 +37,30 @@ TEE protects against the cloud provider, but the *operator* (whoever deploys the
 - Secrets injected at runtime
 - Which docker image version to deploy
 
+## The Prompt-Path Test
+
+A systematic way to evaluate each operator-controllable slot (env var in `allowed_envs`, an entry under `secrets:`, a value sourced from an unmeasured external-config disk, etc.). For each declared slot, do a code-trace and answer:
+
+> **Can the operator change this value to intercept, redirect, modify, decrypt, sign, log, or exfiltrate the user's plaintext prompt or response?**
+
+If **yes** → the slot is **on the prompt path**. The deployment fails Stage 1 §4 (no operator access to secrets) and §7 (no backdoor / debug paths) for that slot, regardless of whether the leak is observed today.
+
+If **no** → the slot is **off the prompt path**. Document every read site of the value as part of the audit so a re-audit on the next release can re-verify the same property holds.
+
+**Examples**:
+
+| Slot | Verdict | Reason |
+|---|---|---|
+| `INFERENCE_URL` used to route to a backend | on prompt path | operator can point at a logging relay |
+| `OPENAI_API_KEY` if proxy falls back to external endpoint | on prompt path | operator can redirect plaintext upstream |
+| `MODEL_NAME` if it drives KMS key derivation | on prompt path | swaps which key the user encrypts to |
+| `LOG_ENDPOINT` if app ships request bodies | on prompt path | direct exfiltration channel |
+| `DOMAIN` used as hostname filter when TLS is pinned to attested SPKI | off prompt path | can't redirect ciphertext |
+| `USAGE_REPORTER_SECRET` HMACing fixed-URL telemetry, no prompt content in payload | off prompt path | secret can't decrypt or sign user-facing |
+| `DD_API_KEY` for Datadog if no prompt content is logged | off prompt path | telemetry only |
+
+Several case studies use this term explicitly: see [tinfoil-confidential-inference §Stage Assessment](../case-studies/tinfoil-confidential-inference/DEVPROOF-REPORT.md#stage-assessment) for a worked example with `DOMAIN` and `USAGE_REPORTER_SECRET`. The Stage 1 *conditional* verdicts in such audits ("Stage 1, conditional on no prompt-path entries") are exactly this test applied slot-by-slot to the live deployment.
+
 ## Critical Checks
 
 ### 1. Configuration Control (Most Common Vulnerability)
