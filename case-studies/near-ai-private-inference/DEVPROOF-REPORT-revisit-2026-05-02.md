@@ -167,23 +167,32 @@ through the inline-verification path before serving.
 corresponding model `crates/database/src/models.rs` still hold conversation
 IDs, titles, and timestamps. No message-content columns were added.
 
-### 5. AppAuth contracts on Base — still unverified ❌
+### 5. AppAuth contracts on Base — verified ✅ (2026-05-09)
 
-`0x000b2d32…`, `0xf723e96a…`, `0xf550fdfb…`, `0xc5f76292…`, `0xe78c1291…` are
-all unverified on Basescan as of today. Without the source, we can't read off
-who owns the contracts, whether `addComposeHash` is restricted, or whether
-upgrades are disabled. Recommendation unchanged from Jan: ask NEAR to verify
-the contract source so the off-chain compose-hash whitelist becomes
-re-checkable.
+The two implementation contracts behind every NEAR DstackKms / DstackApp
+proxy now have `exact_match` source on Sourcify, Basescan, and Blockscout:
+
+- `DstackKms` impl: [`0x2e99ade185c125145d5defa11c6ea33ecd532e28`](https://repo.sourcify.dev/8453/0x2e99ade185c125145d5defa11c6ea33ecd532e28/)
+- `DstackApp` impl: [`0x7e5192c0aa36e35e003351bffb8ebb213e7e1ba9`](https://repo.sourcify.dev/8453/0x7e5192c0aa36e35e003351bffb8ebb213e7e1ba9/)
+  (shared by all 50+ active per-app proxies — `0xf550fdfb…` cloud-api,
+  `0x2c0a0c96…` shared models, `0xf723e96a…` chat-api, `0x000b2d32…`
+  ingress, `0xc5f76292…` postgres, `0xe78c1291…` vpc-server, etc.)
+
+Source matches `Dstack-TEE/dstack@771f3c9e` (last contract-touching commit
+before the 2025-09-24 deployment), solc 0.8.22 / optimizer enabled / runs=200
+/ evmVersion=paris. Reproducible build verified: byte-for-byte identical to
+deployed runtime bytecode modulo the standard OZ UUPS `__self` immutable
+(impl's own address patched into 3 places at construction). Submitted to
+Sourcify by the audit; auto-propagated to Blockscout, separately verified on
+Basescan.
+
+This closes the prior recommendation. Anyone reading attestation reports can
+now click through to verified Solidity for `addComposeHash`, `registeredApps`,
+`allowedComposeHashes`, owner/upgrade controls, and read off the access
+control directly.
 
 The `ComposeHashAdded` log set is queryable on Base (script in this folder is
-`query-compose-hashes.py`); the prior audit counted 56 active compose hashes
-total across the three contracts, none removed. Both current production
-hashes (`ab2f90d6…` for chat-api, `2e84b721…` for cloud-api) are post-Jan and
-will appear in any re-run. (A re-run was kicked off during this audit; the
-public Base RPC rate-limits eth_getLogs ranges — see the script for the
-right pagination, or use the more recent `eth_getLogs` of `topic0 in
-{ComposeHashAdded, ComposeHashRemoved}` against an Alchemy/Infura key.)
+`query-compose-hashes.py`).
 
 ---
 
@@ -298,55 +307,45 @@ this thread — and the compose-hash leg is genuinely not done yet.
 - **Operator-controlled discovery URL.** `MODEL_DISCOVERY_SERVER_URL` is no
   longer read by the binary; routing comes from a DB column gated by admin
   auth, and the inline-verification path has real TDX/GPU checks. ✅
+- **AppAuth contracts on Base verified** (2026-05-09). DstackKms impl
+  `0x2e99ade1…` and DstackApp impl `0x7e5192c0…` (shared by every NEAR
+  per-app proxy) now have `exact_match` source on Sourcify, Basescan, and
+  Blockscout. Source = `Dstack-TEE/dstack@771f3c9e`, solc 0.8.22 / opt 200.
+  See §5 above. ✅
 
-### Critical (still open)
-- **Backend code is not pinned.** The verifier extracts `compose_hash` but
-  never compares it; `ALLOWED_IMAGE_HASHES` is unset in production. Net
-  result: any TDX+H100 the operator spins up will pass — including one
-  running operator-side logging code.
-- **AppAuth contracts on Base are unverified.** Cannot mechanically check
-  the operator's list of authorized compose hashes, owner, or whether
-  upgrades are disabled.
-- **KMS root pubkey provenance is unverifiable.** NEAR's KMS contract on
-  Base (`0x8fa1593fac104c1aa0c59eaa3553f7e3e162d637`) has its
-  `kmsInfo` struct *empty across all four fields* — `k256Pubkey`,
-  `caPubkey`, `quote`, and `eventlog` all return zero-length bytes.
-  Phala's canonical KMS at `0x2f83172A…` populates them correctly
-  (33B compressed secp256k1 pubkey, 91B P-256 SPKI, 5006B TDX quote,
-  6417B eventlog). The on-chain anchor that would let an external
-  verifier link the booting KMS pubkey (`info.key_provider_info.id`
-  in every CVM attestation) to a TDX-attested KMS instance does not
-  exist for NEAR's deployment. The KMS endpoint at
-  `kms.cvm1.near.ai:443/8443` is also not externally reachable, so
-  the quote isn't published anywhere a verifier can read it.
+### Critical (server-side trust model)
+- **Backend code is not pinned at the gateway.** cloud-api's verifier
+  extracts `compose_hash` from the backend's TDX quote but doesn't compare
+  it against an allowlist; `ALLOWED_COMPOSE_HASHES` is unset in production.
+  A user trusting cloud-api alone has no protection: any TDX+H100 backend
+  the operator points the gateway at will pass cloud-api's checks, including
+  one running operator-side logging code.
 
-  Because the KMS root k256 is the seed for *every* derived app key
-  — including each model's Ed25519 signing key, whose
-  `to_montgomery()` is the X25519 recipient pubkey for E2EE — anyone
-  who holds the KMS root private key can decrypt every E2EE prompt
-  off-chain, on a normal machine, in seconds. The TEE design's
-  protection against this is precisely that the root is generated
-  inside the TD's TDX-protected memory and never leaves; the
-  on-chain `kmsInfo.quote` is the public record of that fact.
+  **N/A under closed-chain verification.** Clients running the attestation
+  check themselves (e.g.,
+  [`verifiers/near_ai_lightclient.py`](https://github.com/amiller/awesome-private-inference/blob/main/verifiers/near_ai_lightclient.py)
+  or hermes-agent's strict mode) extract the compose hash from the
+  attestation directly and check it against the on-chain
+  `addComposeHash` set on Base. The gateway-side check being unconfigured
+  doesn't affect them.
 
-  The dstack-KMS reference implementation
-  (`dstack/kms/src/onboard_service.rs::Keys::generate`) does
-  generate the root via `OsRng` inside the TD — but only produces a
-  binding `quote` if `quote_enabled=true`, and only the FIRST KMS
-  instance bootstraps that way. Replicas use `Keys::onboard`, whose
-  RA-TLS attestation gating is also conditional on `quote_enabled`.
-  With NEAR's on-chain `kmsInfo` empty, an external observer cannot
-  distinguish "root generated in TD with `quote_enabled=true`,
-  deployer simply forgot to publish via `setKmsInfo`" from "root
-  generated off-chain and imported into a `quote_enabled=false` KMS
-  instance." Both are consistent with the on-chain state.
+### Residual (belt-and-suspenders)
+- **`kmsInfo` on `DstackKms` is empty.** All four fields (`k256Pubkey`,
+  `caPubkey`, `quote`, `eventlog`) return zero-length bytes on
+  `0x8fa1593fac104c1aa0c59eaa3553f7e3e162d637`. Each per-CVM attestation
+  already carries `info.key_provider_info.id` (the asserted KMS pubkey),
+  and the dstack source is auditable + verified, so a closed-chain client
+  can pin the KMS pubkey across attestations and trust dstack's
+  `quote_enabled=true` + `OsRng`-inside-TD machinery to produce a TEE-bound
+  root. The on-chain `kmsInfo.quote` would be the public TEE-attested
+  proof of that fact rather than a transitive trust chain — useful but not
+  load-bearing for a verifying client. Phala's canonical KMS at
+  `0x2f83172A…` populates these fields; NEAR's hasn't.
 
-  **Fix path:** NEAR populates `kmsInfo` on
-  `0x8fa1593fac104c1aa0c59eaa3553f7e3e162d637` by calling
-  `setKmsInfo((k256Pubkey, caPubkey, quote, eventlog))` with the
-  KMS instance's bootstrap output. The deployer keeps the EOA
-  authority required for `setKmsInfo`; the call only needs to
-  happen once.
+  **Fix path (if NEAR cares to close it):** call
+  `setKmsInfo((k256Pubkey, caPubkey, quote, eventlog))` once on
+  `0x8fa1593fac104c1aa0c59eaa3553f7e3e162d637` with the bootstrap output
+  from the KMS TD.
 
 ### Operational regression
 - **`/evidences/quote.json` is 0 bytes** as of 2026-05-02 04:49 UTC. The
