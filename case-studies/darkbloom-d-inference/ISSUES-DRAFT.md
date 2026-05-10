@@ -139,13 +139,28 @@ Optional follow-up: also expose the most recent challenge-response (with `status
 
 ---
 
-## F3 — No public coordinator attestation endpoint
+## F3 — No public coordinator attestation endpoint, and the substrate claim is itself unverifiable
 
 ### Summary
 
-`CLAUDE.md`, the deploy runbook, and the research paper Figure 1 all state that the production coordinator runs in a TEE — paper Fig 1 specifically labels it Intel TDX, with the supplementary `papers/diagram-test.pdf` saying *"EigenCompute (Intel TDX TEE)"*. However, there is no public endpoint where an outside auditor can fetch a TEE quote for the coordinator. `GET /v1/coordinator/attestation` returns 404. EigenCloud's docs (`docs.eigencloud.xyz`) return 403 to anonymous fetch; the marketing page (`eigencloud.xyz`) does not specify the underlying TEE substrate.
+`CLAUDE.md`, the deploy runbook, and the research paper Figure 1 all state that the production coordinator runs in a TEE — paper Fig 1 specifically labels it Intel TDX, with the supplementary `papers/diagram-test.pdf` saying *"EigenCompute (Intel TDX TEE)"*. However, there is no public endpoint where an outside auditor can fetch a TEE quote for the coordinator. `GET /v1/coordinator/attestation` returns 404.
 
 This is the load-bearing piece of the trust model: when sealed mode is not used (the default — `Content-Type: application/eigeninference-sealed+json` is opt-in per `coordinator/internal/api/sender_encryption.go`), every prompt is decrypted by the coordinator before being re-encrypted to the chosen provider. The coordinator-as-TEE claim is the only thing keeping Eigen Labs from seeing plaintext at that boundary, and there is no way for an outside party to verify it.
+
+**Substrate claim is internally inconsistent across the project's own docs:**
+
+| Source | Substrate claim |
+|---|---|
+| `papers/dginf-private-inference.pdf` Figure 1 | Intel TDX |
+| `papers/diagram-test.pdf` | EigenCompute (Intel TDX TEE) |
+| `coordinator/internal/api/server.go:11` | GCP Confidential VM (AMD SEV-SNP) |
+| `coordinator/cmd/coordinator/main.go:8` | GCP Confidential VM (AMD SEV-SNP) |
+| `CLAUDE.md` Infrastructure | EigenCloud (TEE), substrate unspecified |
+| `eigencloud.xyz` | no substrate disclosure |
+
+**Host platform acknowledges trustless execution is not yet implemented.** From [`Layr-Labs/ecloud`](https://github.com/Layr-Labs/ecloud) README, *Mainnet Alpha Limitations*:
+
+> "Developer is still trusted — Mainnet Alpha does not enable full verifiable and trustless execution. A later version will ensure developers can not upgrade code maliciously, and liveness guarantees."
 
 For comparison, every other CVM-backed inference provider in the broader cohort publishes its TEE quote:
 

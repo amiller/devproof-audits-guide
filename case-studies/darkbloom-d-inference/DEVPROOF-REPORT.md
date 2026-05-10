@@ -289,11 +289,28 @@ fc1df89f  JK6RKWCW6C   Apple M4 Max
 
 **Suggested fix:** add `signed_attestation_b64`, `attestation_signature_b64`, `binary_hash`, `encryption_public_key` to the response. Verification logic already exists in `attestation.Verify`.
 
-### F3 — No public coordinator attestation endpoint (medium → high depending on how the project frames its claims)
+### F3 — No public coordinator attestation endpoint, and the substrate claim is itself unverifiable (high)
 
 `api.darkbloom.dev` runs in EigenCloud TEE per `CLAUDE.md`. There is no externally fetchable TEE quote, no published coordinator image hash, no Sigstore-signed predicate tying the running image to a Git commit. Compare to Tinfoil's `atc.tinfoil.sh/attestation`, Phala dstack apps' 8090 endpoint, NEAR Private AI Verifier's on-chain anchors.
 
-**Suggested fix:** publish `GET /v1/coordinator/attestation` returning the EigenCloud-provided TEE quote + image digest + a build-pipeline link. Even the minimum version (just publish the EigenCloud quote + a coordinator commit hash) closes the largest single gap.
+**Substrate claim is internally inconsistent across the project's own docs:**
+
+| Source | Substrate claim |
+|---|---|
+| `papers/dginf-private-inference.pdf` Figure 1 | Intel TDX |
+| `papers/diagram-test.pdf` | EigenCompute (Intel TDX TEE) |
+| `repo/coordinator/internal/api/server.go:11` | GCP Confidential VM (AMD SEV-SNP) |
+| `repo/coordinator/cmd/coordinator/main.go:8` | GCP Confidential VM (AMD SEV-SNP) |
+| `CLAUDE.md` Infrastructure | EigenCloud (TEE), substrate unspecified |
+| `eigencloud.xyz` | no substrate disclosure |
+
+**The host platform itself acknowledges trustless execution is not yet implemented.** From [`Layr-Labs/ecloud`](https://github.com/Layr-Labs/ecloud) README, *Mainnet Alpha Limitations* section:
+
+> "Developer is still trusted — Mainnet Alpha does not enable full verifiable and trustless execution. A later version will ensure developers can not upgrade code maliciously, and liveness guarantees."
+
+Eigen Labs' own SDK README states that the deployment model d-inference depends on does not currently bind a TEE attestation to a verifiable image. So even if TDX hardware is in the loop, the application-level "the coordinator running this prompt is the one I think it is" property is not currently enforced at the platform layer.
+
+**Suggested fix:** publish `GET /v1/coordinator/attestation` returning the EigenCloud-provided TEE quote + image digest + a build-pipeline link. Reconcile the substrate claim across docs (paper Fig 1, source code comments, `CLAUDE.md`) — pick one and update the others. If EigenCloud's substrate is opaque or the platform doesn't yet support image-bound attestation, document that fact in `docs/ARCHITECTURE.md` so the trust model is honest about where the chain ends.
 
 ### F4 — Release registry has no public history; silent adds are a CT-analogous MITM vector (medium → high under realistic insider/CI-compromise threat models)
 
