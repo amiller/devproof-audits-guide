@@ -16,10 +16,15 @@ import json, base64, hashlib, secrets, urllib.request
 
 K = open("/tmp/ck").read().strip()
 BASE = "https://api.chutes.ai"
-# two distinct confidential models, same hardware class:
+# Several distinct confidential models. Instance placement is nondeterministic,
+# so we probe a handful and look for any pair that lands on the same image+hardware
+# (=> byte-identical quote across two different models, proving model is unmeasured).
 MODELS = {
     "Qwen3-32B-TEE": "ac059e33-eb27-541c-b9a9-24b214036475",
     "gemma-4-31B-TEE": "42ee92ba-a537-5a73-8741-876067750db7",
+    "GLM-5-TEE": "e51e818e-fa63-570d-9f68-49d7d1b4d12f",
+    "DeepSeek-V3.2-TEE": "398651e1-5f85-5e50-a513-7c5324e8e839",
+    "Kimi-K2.6-TEE": "aac09863-35b4-5d9b-9b67-6e6a9d54273a",
 }
 
 
@@ -29,16 +34,17 @@ def get(url):
 
 
 def parse_quote(b64):
+    # Offsets per chutes-api/api/server/quote.py:124-129 (td_report = quote[48:]).
     q = base64.b64decode(b64)
-    body = q[48 : 48 + 584]
+    body = q[48:]
     return {
         "td_attributes": body[120:128].hex(),
+        "mrtd": body[136:184].hex(),
+        "rtmr0": body[328:376].hex(),
+        "rtmr1": body[376:424].hex(),
+        "rtmr2": body[424:472].hex(),
+        "rtmr3": body[472:520].hex(),
         "report_data": body[520:584].hex(),  # 64 bytes
-        "mrtd": body[136 : 136 + 48].hex(),
-        "rtmr0": body[184 : 184 + 48].hex(),
-        "rtmr1": body[232 : 232 + 48].hex(),
-        "rtmr2": body[280 : 280 + 48].hex(),
-        "rtmr3": body[328 : 328 + 48].hex(),
     }
 
 
@@ -90,9 +96,19 @@ rd_a = parse_quote(evidence(inst0["instance_id"], secrets.token_hex(32))["quote"
 rd_b = parse_quote(evidence(inst0["instance_id"], secrets.token_hex(32))["quote"])["report_data"]
 print(f"[2] freshness: two nonces -> different report_data: {rd_a != rd_b}\n")
 
-# [6] model substitution — identical measurements across two different models
-a, b = (fingerprints[k] for k in MODELS)
-print("[6] MODEL-SUBSTITUTION CHECK (two different models, same hardware class):")
-for i, reg in enumerate(["MRTD", "RTMR0", "RTMR1", "RTMR2", "RTMR3"]):
-    print(f"    {reg:5} identical : {a[i] == b[i]}")
-print("    => the served model is NOT distinguished by any measured register (F1).")
+# [6] model substitution — look for two different models with byte-identical quotes
+names = list(fingerprints)
+mrtd_all_same = len({fp[0] for fp in fingerprints.values()}) == 1
+print(f"[6] MODEL-SUBSTITUTION CHECK ({len(names)} different models probed):")
+print(f"    MRTD identical across ALL probed models: {mrtd_all_same}")
+full_match = None
+for i in range(len(names)):
+    for j in range(i + 1, len(names)):
+        if fingerprints[names[i]] == fingerprints[names[j]]:
+            full_match = (names[i], names[j])
+if full_match:
+    print(f"    Two DIFFERENT models with byte-identical MRTD+RTMR0-3: {full_match[0]} == {full_match[1]}")
+    print("    => the served model is NOT distinguished by any measured register (F1).")
+else:
+    print("    No fully-identical pair this run (instances landed on different image/hardware).")
+    print("    Re-run: placement is nondeterministic. MRTD-identical already shows model is unmeasured.")

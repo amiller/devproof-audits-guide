@@ -7,6 +7,8 @@
 
 This is a **devproof** audit: the question is whether Chutes' claims are *externally verifiable by a client without trusting Chutes*, not whether the system is "secure" in the abstract. Findings are framed as verifiability gaps suitable for public GitHub issues.
 
+> **Exploitability validation (2026-05-25):** see [`EXPLOITABILITY-VALIDATION.md`](./EXPLOITABILITY-VALIDATION.md). After reviewing the published guest build (`chutesai/sek8s`), the severities below are reprioritized: **F1's "miner can swap the model" is withdrawn** (a measured fail-closed OPA+cosign admission controller + TEE-gated LUKS-key release contain a malicious miner — model substitution reduces to operator-trust); **F2 is overstated** (provenance is reachable via the published builder + recompute scripts); **F5 is not miner-extractable** (operator-trust). The real top priority is **V0** — the mainstream OpenAI-compatible path sends prompts **plaintext through the control plane**, so "not even we can see your data" holds only on the opt-in verified-E2E path (**F3**). The RTMR register offsets in the original §[6] were also corrected.
+
 ---
 
 ## Quick Status
