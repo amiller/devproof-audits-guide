@@ -1,0 +1,1082 @@
+﻿ERC-733: TEE-EVM Co-processing
+Draft v4 — January 2026
+
+
+Justin Zhang (Github: @voidcenter, Sparsity), Andrew Miller (Github: @amiller, Teleport)
+Contact: contact@erc733.org
+
+
+Abstract
+TEE+EVM combines blockchain transparency with hardware-based confidentiality. We present a three-layer framework — attestation, replication, and interoperability — covering common design patterns, best practices, and reference implementations for both applications and underlying frameworks. We conclude with opinionated security stages (0-3) defining security requirements from prototype to trustless TEE, helping projects assess security posture and plan improvements. This ERC enables developers to build confidential, scalable, and trustless TEE+EVM applications.
+
+
+Intro
+TEE+EVM is one of the most promising and widely deployed architectures to scale Ethereum, yet no standard ERC exists. This document fills that gap. 
+This ERC covers on-chain attestations, vendor security patches, secrets replication, and more — providing guidance to design and build TEE+EVM systems end-to-end. Given numerous existing TEE+EVM projects 1,2, they are included as reference implementations — see Appendix F for a complete list. We conclude with opinionated security stages so that projects can rank their security level and plan improvements.
+
+
+Why TEE+EVM?
+* EVM and TEE share a common design principle: removing trust in the application developer[a][b]. EVM achieves this through decentralized consensus; TEE through hardware isolation and vendor-endorsed attestation. While TEE still requires trust in manufacturers and cloud providers, both systems enable permissionless innovation by eliminating the need for app developers to build trusted reputations — lowering the barrier to entry. Integrating them connects these two trust domains, combining EVM's transparency with TEE's confidentiality, as shown in Figure 1.
+
+
+  
+
+Figure 1. Properties of EVM and TEE
+EVM strengthens TEE
+1. Auditability — code measurements and enclave identities stored publicly on-chain
+2. Attestation trust — smart contracts as bulletin boards for collaterals such as TCBInfo 3 and intermediate certificates, removing MITM risk
+3. Upgrade governance — on-chain enforcement of publication proofs and policies
+4. Consensus — blockchains provide an append-only log for sequencing, checkpoints, and replay prevention — preventing split-brain and double-spend
+TEE scales EVM
+* Throughput — cloud-grade execution with blockchain security
+* Privacy — confidential off-chain computation
+Together, these make TEE+EVM a strong candidate for the next breakout Ethereum application.
+
+
+Assumptions and Scope
+This ERC covers only the TEE coprocessor pattern — systems where TEEs run alongside the blockchain. Systems where the blockchain VM itself runs inside a TEE are out of scope.
+Regarding TEE hardware, this ERC focuses on the latest CVM (Confidential VM) model rather than earlier architectures.
+
+
+TEE Overview
+This section briefly reviews TEE in its own context. A more thorough deep dive on TEE and glossary are included at the end. Several vendors — Intel, AMD, Amazon, etc. — offer TEE with similar design philosophies. Standards bodies such as IETF are working to unify these designs. Figure 2 shows the components in a TEE stack.
+  
+
+Figure 2. The TEE Stack
+* The workload code. The software code with business logic to be run in the TEE. 
+* The secure enclave. The isolated environment that runs the workload code, including foundational software like the OS. The enclave provides integrity and privacy guarantees against the machine operator.
+* The TEE hardware. The CPU or chip that enforces isolation — Intel TDX, AMD SEV (CPU-level memory encryption), or AWS Nitro (hypervisor-enforced isolation). This is the trusted root, endorsed by the vendor's X.509 certificate chain. Intel TDX and AMD SEV provide full VM networking; AWS Nitro Enclaves have no direct network access and must communicate through a vsock proxy on the parent instance. 
+* The deployment environment. The physical or cloud infrastructure where the enclave runs. This includes the host OS, VMM, and machine operator — all untrusted by design. TEE protects the enclave against a malicious environment. Deployment can be bare metal or cloud-hosted (with optional vTPM attestation to prove cloud residency).
+The workload code, the secure enclave and the TEE hardware are collectively called the trusted computing base (TCB) — the set of components that must be trusted for the system's security. 
+The trust in TCB is cryptographically established as follows, more details can be found in Appendix A TEE Deep Dive:
+* Code measurement. A set of cryptographic hashes of the software components such as the workload code, OS and firmware. Given a reproducible building process, matching hashes implies identical system components, allowing anyone — including smart contracts — to quickly verify software integrity. For non-reproducible builds, integrity can alternatively be verified by replaying an event log. See Appendix A for details.
+* Attestation. A signed document generated by the enclave and rooted in the TEE vendor's X.509 certificate chain. It contains the enclave's code measurements and custom developer-defined data. In plain English: "I, the vendor (e.g., Intel), certify that an enclave exists with software that hashes to these measurements, initialized with this data."
+   * Developer-defined data: The workload can initialize with arbitrary data and include it in the attestation. A common pattern: generate a secp256k1 key pair inside the enclave and include the public key in the attestation — creating an EVM wallet whose private key never leaves the enclave and is inaccessible even to the developer.
+
+
+Typical workflows
+TEEs can run in single-enclave or multi-enclave configurations. Here is a typical single-enclave boot workflow:
+1. Enclave booting. The developer deploys the application to TEE hardware — as a Docker container (AWS Nitro) or within a confidential VM (Intel TDX, AMD SEV). The enclave boots, generates code measurements, and initializes developer-defined data such as key pairs.
+2. Attestation verification. The enclave produces an attestation document containing code measurements and developer-defined data, endorsed by the vendor's X.509 chain. Anyone can verify the attestation to establish trust in the enclave. Subsequent outputs can be verified using the enclave's keys.
+Multi-enclave setups enable horizontal scaling, crash recovery, and software upgrades — all requiring secret replication between enclaves. Two key primitives enable multi-enclave coordination: secret replication for sharing keys between enclaves, and multi-party computation (MPC) for distributed computation without exposing secrets. Both are covered in detail later.
+In multi-enclave workflows, booting and attestation remain identical to the single-enclave case. The difference is secrets handling:
+Scenario
+	Secrets handlings
+	First deployment
+	Secrets generated by enclave or KMS, stored in KMS
+	Scaling / recovery / upgrade
+	Secrets replicated from KMS or peer enclave
+	
+
+Security considerations
+Side-channel vulnerabilities. TEEs are vulnerable to side-channel attacks and no known protection fully mitigates them. In practice, cloud providers (Google, Microsoft, AWS) mitigate this risk through strong operational security and reputational incentives — they have no motivation to attack customer workloads. Cloud attestations (e.g., vTPM) provide additional proof of cloud residency; verifying them together with TEE attestations provides hardened trust. See Appendix A for more details.
+Upgrade trust. Software upgrades change code measurements and require re-verification of integrity. If not handled carefully, upgrades can result in rugpulls or data breaches. A robust upgrade process involves trust maintenance, secrets migration, traffic handoff, and — most importantly — community oversight. This is covered in the Replication Layer section below.
+
+
+TEE+EVM Application Examples
+By offloading heavy workloads to off-chain TEE enclaves, the TEE+EVM pattern enables a wide range of applications. Here is a non-exhaustive list — if you are excited about any other TEE+EVM applications, please email it to contact@erc733.org. 
+* Trustless AI Agent — AI agents that run autonomously without trusting the developer or operator
+* Private DEX — High speed trustless DEX that protects the users’ privacy
+* Fintech — Compliant trustless fintech solutions with fine-grained privacy control and flexible Web2 service integrations
+* Oracles — Off-chain data delivered on-chain with cryptographic proof of authenticity
+* Bridges — Trustless cross-chain messaging without relying on centralized relayers
+* DAO Governance — Complex governance logic executed privately with on-chain verifiable outcomes
+These applications vary along two dimensions:
+
+
+	Trustless Agent
+	Private DEX
+	Fintech
+	Oracles
+	Bridges
+	DAO Governance
+	Stateful?
+	Maybe 
+	Yes
+	Yes
+	Maybe
+	If maintaining wallet
+	Yes
+	Rely on Web2?
+	If accessing the web
+	If using price feeds
+	Yes 
+	Yes
+	No
+	No
+	
+
+Now we dive into each in detail.
+
+
+Trustless Agent
+ERC-8004 4 proposes on-chain AI agent registration for trustless, decentralized coordination.  TEE enables this by providing verifiable integrity for agent execution. See this design doc 5 for running 8004 agents on TEE+EVM. Agents can be stateful (persistent internal state) or stateless. Reference implementations include Talos 6. 
+
+
+Private DEX
+High-speed DEXs like Hyperliquid combine the trustlessness of DEXs with the performance of CEXs. However, they lack privacy—everyone’s liquidation prices are visible, leading to incidents such as James Wynn’s $100M BTC position being intentionally liquidated 7. TEE is currently the only technology that delivers trustlessness, performance, and privacy simultaneously. 
+
+
+[c]
+Fintech
+Organizations benefit from managing financial operations on-chain for trust, compliance, and auditability. These systems require privacy and involve KYC, taxation, compliance, and Web2 integrations. TEE+EVM is an ideal platform for such applications. 
+
+
+Reference implementation:
+* Cycles – the open clearing protocol 8 
+* PASS: A Provenanced Access Subaccount System for Blockchain Wallets 9
+
+
+Oracles
+Oracles provide off-chain data to blockchains, and their integrity is critical for application security. Using TEEs, oracle programs can run within secure enclaves, with integrity, and access Web2 resources via TLS. This may be more economical and practical than ZK-based approaches. Such oracle programs can plug into any chain or be used by off-chain applications. In the latter case, the blockchain only stores integrity commitments of the oracle enclave.
+
+
+Reference implementations:
+* Switchboard 10 (github) 
+* Town crier 11 (github) 
+* Dstack oracle tutorial[d] 12
+* Outlayer
+
+
+Bridges
+Bridges connect different blockchains and are among the most vulnerable components in blockchain ecosystems. TEE significantly strengthens bridge security by increasing defense depth and reducing trust assumptions.
+Reference implementations:
+* Avalanche bridge 13: Uses an MPC network composed of TEE nodes (“Wardens”) to verify cross-chain events. TEEs run full nodes in enclaves and index transactions. Enclave attestations are not committed on-chain and can be improved per this spec.
+* pNetwork 14: MPC+TEE arbitrary messaging bridge.
+* Bool network 15: MPC+TEE arbitrary messaging bridge.
+* LCP network 16: Attested messages from the source network are submitted by a light client committee running in enclaves; business logic is controlled by smart contracts on the target network.
+* Liquefaction 17: Academic work on TEE-based applications including bridges.
+
+
+DAO Governance
+DAO governance involves tasks like treasury management, voting, delegation. TEE allows DAOs to offload such tasks to secure enclaves for privacy and cost-effectiveness. The DAO remains trustless with its assets and key data stored on-chain.
+
+
+TEE+EVM Architecture
+
+
+This section dives into the common design patterns for TEE+EVM applications in three layers — attestation, replication, and interoperation — as shown in Figure 3. These three layers build on each other — attestation establishes trust, replication maintains it across enclaves, and interoperability extends it to external systems. 
+
+
+* Attestation layer: Application enclave is booted with attestation verified on-chain linking to audited and trusted code, allowing for subsequent verified execution. 
+* Replication layer: Application secrets are replicated among the enclaves, enabling horizontal scaling, crash recovery and upgrading.
+* Interoperability layer: Application enclaves collaborate with external systems through TLS connections.
+
+
+  
+
+Figure 3. The attestation, replication and interoperability layers of TEE+EVM
+
+
+
+
+Attestation Layer
+
+
+The attestation layer establishes code integrity on-chain — proving the application runs audited, trusted code in a secure enclave. On top of this, encumbered keys provide cryptographic identity for secure operations, and the on-chain registry organizes attested enclaves with governance.
+ 
+Establishing code integrity
+
+
+Code integrity is established in three logical steps – proving trusted code, attesting secure enclave deployment and verifiably linking the two, as shown in Figure 4.
+
+
+Step 1. Trusted code. The application developer proves code integrity — demonstrating to the public that the code does what it claims without hidden malicious logic. The most straightforward way to prove this is to open-source the code. Alternatives exist — e.g., closed-source audits by reputable third parties, or formal verification with ZK proofs.
+
+
+Step 2. Attested deployment. The application is deployed into a TEE enclave. The enclave hardware produces an attestation document measuring the deployed software and the enclave environment, endorsed by the hardware vendor’s X.509 certificate chain. This allows an on-chain verifier to remotely verify both what software is running and that it runs in a secure enclave. The measurements are recorded on-chain. See Appendix C for details on on-chain verification and gas optimizations.
+
+
+Step 3. Verifiably link attested deployment to trusted code. If the code measurement is deterministic, then one can simply compare the attested measurement with a measurement from deployment of the trusted code. An identical match implies identical code running in the enclave. In practice, measurements can be nondeterministic due to randomness in building or booting. Appendix D covers ways to make the measurement deterministic and mechanisms to prove code integrity for nondeterministic measurements.
+
+
+  
+
+Figure 4. Establishing Code Integrity
+
+
+Reference implementations:
+* Flashtestations 18
+* Dstack TEE 19
+* Oasis protocol ROFL 20
+
+
+
+
+Encumbered keys
+The software in the enclave can own key pairs — called encumbered keys 17 — where the private key exists only in the enclave and the public key is included in the attestation and recorded on-chain. This enables two patterns:
+* Signing: Downstream users can verify that data signed by the encumbered private key genuinely originated from the enclave.
+* Encryption: Data encrypted with the encumbered public key can only be decrypted by the enclave.
+A common pattern is for the enclave to have an encumbered secp256k1 key for signing — essentially giving the enclave its own EVM wallet and allowing it to sign transactions and manage assets on-chain. 
+
+
+
+
+Enclave identity and on-chain registry
+
+
+TEE+EVM is powerful because blockchain enables trustless management of enclaves. As shown in Figure 5, this involves managing applications and the enclaves within them. Applications commonly involve multiple enclaves for scaling and upgrades — discussed further in the replication layer section.
+
+
+  
+
+Figure 5. Managing enclaves on-chain
+
+
+Managing applications is straightforward. The following minimalistic data structure can be used to store the application mapping — assuming each application has its own smart contract. Each application can be further made a ERC-721 21 token, making ownership transfer easy.
+
+
+contract Registry {
+        struct Application {
+    address deployer;                
+    string  name;          
+    address contract;    // application contract address
+}
+mapping(uint256 => Application) public apps;// appId => application
+}
+	
+
+
+
+Managing enclaves for an application is trickier due to the off-chain security and confidentiality requirements. First we need to give each enclave an identity to enable authentication and authorization. An enclave’s identity comes from two verifiable sources – code measurement and public key. 
+
+
+* Code measurement. Immutable hash indicating the software running in the enclave, provable through TEE attestation.
+* Public key: Public key that is unique to each enclave, provable through signature.
+
+
+Suppose an application has two versions — v1 and v2 — each deployed to two enclaves, each with its own encumbered public key. There are four enclaves total: two share the v1 code measurement, two share the v2 measurement, and all four have unique encumbered public keys. This is illustrated in Figure 6.
+
+
+  
+
+Figure 6. Application enclaves example
+
+
+When an enclave's attestation is verified on-chain, its encumbered public key is recorded, forming its identity alongside the code measurement. The following data structure stores the application/version/enclave hierarchy with lookup maps.
+
+
+contract Registry {
+struct Enclave { 
+address wallet; 
+bytes32 codeMeasurement; 
+} 
+
+
+struct Version { 
+bytes32 codeMeasurement[e]; 
+uint256 appId;
+Enclave[] enclaves; 
+} 
+
+
+struct Application { 
+address deployer; 
+string name; 
+address appContract; 
+Version[] versions; 
+}
+
+
+mapping(uint256 => Application) public apps; // appId => application
+
+
+// maps for quickly looking up versions and enclaves, using code 
+// measurement and encumbered public key (wallet address) respectively
+mapping(bytes => Version) public versions;
+mapping(address => Enclave) public enclaves;
+}
+	
+
+On top of this identity structure, governance policy can be built for scenarios like horizontal scaling, crash recovery and software upgrade. These are discussed in more detail in the replication layer section.
+
+
+Reference implementations:
+* On-chain CVM registry from Automata 22
+* Flashtestations on-chain registry 23
+* Sparsity on-chain TEE registry 24
+
+
+Replication Layer
+During horizontal scaling, software upgrades, and crash recovery, new enclaves join the fleet and need access to application-wide data such as:
+* Assets — financial assets in custody
+* Encrypted user data — private ledgers, order books, etc.
+Because only encumbered keys can control this data, the critical requirement is securely replicating these keys across authorized enclaves — while maintaining:
+* Security: Only trusted, attested enclaves may hold the keys.
+* Availability: At least one trusted enclave must hold the keys at any time.
+
+
+Securely replicating encumbered keys
+A sender enclave can securely transfer encumbered keys to a recipient by encrypting them with the recipient's encumbered public key. It is important for the sender to authenticate the recipient and confirm that the recipient is authorized to receive the secret. This is best solved by using a registry smart contract to manage enclave identity and authorization. Here are a few scenarios where the enclaves can be authorized by the registry to receive secrets:
+* Horizontal scaling and crash recovery — the enclave is registered in the current version of the application. This requires the enclave to be first attested matching the designated code measurement.
+* Software upgrade — the enclave is registered in a newer version of the same application. Governance is needed to ensure new version integrity checks and community consensus — more on this later. 
+Additional governance like developer approval can be implemented in the registry. 
+Note the sender enclave needs to have a way to interact with the blockchain to verify the receiver’s identity and authorization. This can be done by running a light client like Helios 25 inside the enclave. In this case, the root of trust (the hash of a trusted block) should be part of the code measurements.
+Replicatoor 26 is a reference implementation for replicating secrets among enclaves.
+
+
+Key management service (KMS)
+
+
+KMS is a design pattern to ensure the availability of encumbered keys — or simply, secrets. In the rare case when all enclaves of an application crash due to power outage or software bugs, encumbered keys are lost — leading to irrecoverable assets and data. Mitigating this risk requires redundancy that is hard to define and expensive to operate. This gives rise to KMS — a place where secrets can be securely stored with long-term availability.
+
+
+A KMS can simply be a group of attested enclaves. When the customer stores a secret, the secret is replicated to all KMS enclaves. The secret remains available as long as one KMS enclave is running. Enclaves receive their secrets from the KMS in scenarios like scaling and software upgrade, subject to the same authorization process managed by the on-chain registry.
+
+
+As KMS becomes the single point of failure for the secrets from all applications, it needs to be hardened for security and designed for high availability. Appendix E covers such improvements using multi-party computation (MPC) and Intel SGX sealing key.
+
+
+Reference implementations:
+* Oasis Protocol decentralized key management 27[f]
+* Dstack KMS 28
+* Lit Protocol 29 (no on-chain attestation)
+
+
+Software upgrade
+Software upgrade is tricky because it requires both the rigor to audit untrusted code from scratch and the muscle to migrate users and traffic. On one hand, upgraded software has different code measurements and can harbor arbitrary malicious logic — such as code that exfiltrates encumbered keys. On the other hand, the software likely has a sizable user base who needs to understand the risks.
+The registry smart contract usually coordinates software upgrades in two ways — time lock and DAO governance[g][h]:
+* Time lock. New version enclaves can't receive secrets until a notice period expires (e.g., 2 weeks). This gives the community time to audit the new code, raise concerns, or withdraw deposited assets before the upgrade takes effect.
+* DAO governance. Upgrades require explicit approval from a DAO vote. This ensures community consensus before any code measurement change is authorized to receive secrets.
+Both mechanisms prevent a malicious developer from silently shipping a backdoored upgrade. Time lock is simpler; DAO governance is stronger but operationally heavier.
+Reference implementations:
+* Talos agent with upgrade governance 6
+* Demo for App Update Governance with User Opt-out 30 (extended demo 12)
+
+
+
+
+
+
+Interoperability layer 
+Network connectivity lets enclaves communicate with four types of external systems. By terminating TLS inside the enclave, traffic remains confidential from the host operator.
+* Users — serve frontends, accept requests, return signed responses.
+* Blockchains — run light clients (e.g., Helios 25) to read chain state and submit signed transactions.
+* Other enclaves — replicate secrets and conduct multi-enclave computation (covered in Replication Layer), all under the coordination of the blockchain.
+* Web2 services — access APIs, databases, storage, and other external resources.
+This enables several design patterns:
+* Oracles. On-chain smart contracts can access Web2 resources through a TEE proxy. The TEE proxy connects to the Web2 resource using a TLS connection and then uploads the data on-chain using a light client.
+
+
+* Reverse proxy. Smart contracts can be accessed via standard web domains routed through a TEE reverse proxy. TLS terminates in the enclave, which relays requests to the contract.
+
+
+* External storage. Enclaves can offload bulk data to Web2 storage platforms with hashes committed on-chain for integrity and decryption keys persisted in KMS for long-term availability.
+
+
+Reference implementations (oracles, light clients, reverse proxy):
+* Switchboard 10 (github) 
+* Town crier 11 (github) 
+* Dstack oracle tutorial[i] 12
+* Helios 25
+* Dstack gateway 31
+
+
+Application Frontend
+
+
+For user-facing applications, frontend hosting also affects the trust model. There are a few options to host the application’s frontend, with descending levels of trustlessness:
+
+
+1. Local. The frontend is open-source and runs directly on the user’s own machine. For example, one can run the Uniswap frontend locally.
+2. Trustless storage. The frontend is hosted on trustless platforms like IPFS. For example, the Uniswap v2 frontend can be visited from IPFS (release page). Note that the newer versions of Uniswap frontend uses Cloudflare worker and is not relevant here.
+3. Enclave. The frontend is served directly from within the application enclave. Note that standard web domains can route to enclaves. The TLS key for HTTPS should be provably generated from within a TEE. Sparsity Nova Template provides a reference implementation 32.
+4. Centralized platform. The webpage is hosted on centralized platforms like Vercel. For example, one can use the Vercel-deployed Uniswap frontend 33.
+
+
+
+
+
+
+Design Considerations and Trade-offs
+
+
+There are a few common design considerations and trade-offs:
+
+
+* Side channel attacks. There is no way to defend against all side channels in all attacker settings. Some access-pattern leakage is present when accessing disk unless Oblivious RAM is used. The SGXonerated 34 paper, for example, documented how encrypted database access patterns reveal the sender/receiver addresses of otherwise-private token transfers. Whether this leakage is detrimental depends on the application details. Each application SHOULD document its privacy claims and trust model and judge the side-channel exposure accordingly. MPC can mitigate side-channel attacks to some extent, but it comes with a cost and demands a thoughtful trade-off.
+
+
+* Replay and rollback vulnerabilities. There is an inherent tension between latency/availability and security against race conditions. To be strongly consistent, one may need to sequence commands on-chain; otherwise, there is a risk of a double spend or similar attack. For example, if one TEE crashes, it may be unclear whether some instructions need to be replayed on another TEE to maintain consistency. In general, operations that cannot tolerate double spending cannot be fully delegated to a TEE cluster. Sequencing on-chain comes with a cost, and one needs to carefully trade off between risk and cost.
+
+
+* Recovery and upgrade policy. There is an inherent tension between availability (risk of “bricking the network” such that private data cannot be accessed anymore) and avoiding single points of failure or trust in developers. The temptation is to give the developer some backup key to access the secure state “just in case,” though this obviously undermines the trustlessness goal. Trust in the developer can also bite during upgrade when a malicious version with a backdoor can be switched in. One needs to carefully balance restrictions on developer privilege versus ensuring secret availability. A KMS can usually help, even though KMS come with their own attack surface and attack pressure.
+
+
+
+
+ERC-8004 Case Study
+
+
+Let’s walk through this ERC using trustless agents (ERC-8004 4) as an example. ERC-8004 proposes to use blockchains to discover, choose, and interact with agents across organizational boundaries without pre-existing trust, enabling open-ended agent economies. AI agents are heavyweight programs that can’t run in the EVM and are a great use case for TEE+EVM.
+
+
+Single enclave agent
+Figure 7 shows the simplest ERC-8004 agent architecture. It has the following components:
+* On-chain 8004 agent registries that keep records of AI agents and their basic information (agent card) as well as their verified TEE attestations.
+* The agent running inside an enclave, including the agent software, secrets such as API keys, and TLS termination.
+* TLS connections to interact with Web2 resources such as LLMs.
+Figure 7 also shows the downstream user, which can be a human, an application or an AI agent. The user can live on-chain or off-chain and Figure 7 only shows the off-chain case; the on-chain case will be discussed later.
+
+
+
+
+  
+
+Figure 7. Single enclave ERC-8004 agent
+The architecture can be analyzed using the attestation-replication-interoperability model:
+* Attestation layer: The agent enclave must be attested on-chain to establish trust. When downstream users interact with the agent, they fetch the on-chain attestation to verify the agent’s identity and response integrity.
+* Replication layer: Ignored here for simplicity; covered later in this chapter.
+* Interoperability layer: The agent enclave uses TLS connections to access Web2 resources such as LLMs.
+A few design patterns are not reflected above:
+* Agent contract on-chain. As shown in Figure 8, if an 8004 agent is stateful, its state is likely managed partially by smart contracts, which store commitments and other sensitive information. In this case, the agent contract must verify the agent enclave’s identity using the agent registries before interacting with it. The enclave also needs to run a light client to interact with the contract.
+  
+
+Figure 8. ERC-8004 agent with on-chain contract
+
+
+* The downstream user can be an on-chain contract. A downstream user may be a smart contract. In this case, the contract must rely on the agent registries to verify the agent’s identity and response integrity.
+
+
+* LLMs can run in GPU TEEs. Since Nvidia introduced confidential computing in the Hopper architecture, LLMs can now run inside GPU TEEs. This improves AI agents privacy and trustlessness. 
+
+
+Multi-enclave agent and upgrading
+To support horizontal scaling, crash recovery, and upgrade, multi-enclave collaboration is needed. A KMS is used for backing up and restoring enclave secrets. An agent’s data is stored in the following locations (numbers correspond to Figure 9):
+1. Smart contracts store critical data such as assets and data hashes.
+2. Storage platforms (IPFS, cloud) store data blobs, with encryption if needed.
+3. Enclaves store agent working data including secrets.
+4. A KMS stores agent secrets long-term.
+
+
+  
+
+Figure 9. Typical data storage locations for a multi-enclave ERC-8004 agent (see notes above)
+
+
+Replicating secrets among agent enclaves: 
+
+
+* Horizontal scaling. When more enclaves are needed to handle the traffic, new enclaves can be spun up with on-chain attestation and provisioned using secrets replicated from the KMS. 
+* Crash recovery. When an agent enclave crashes, it can reboot and get attested on-chain again with secrets recovered from the KMS.
+* Upgrade. Agent upgrade needs to be coordinated by an on-chain registry using mechanisms such as time lock and DAO governance. Enclaves with the new version of code receive the agent secrets from the KMS. 
+
+
+Security Stages
+At the end of this ERC, we want to propose a multi-stage security guideline for TEE+EVM practitioners. This is a guideline for giving TEE+EVM systems security ratings and for architecting the system accordingly. This is the most opinionated section of this ERC. We hope that this document will not only let more projects enjoy the power of TEE+EVM, but also help them stay secure and prevent attacks.
+Here are the high-level definitions of the four stages:
+
+
+
+
+	Definition
+	Outcome
+	Remarks
+	Stage 0 – prototype / ruggable 
+	The application uses TEE but trust chains are incomplete. The developer or host remains a single point of failure, and the system provides little evidence of integrity to external verifiers.
+	TEE improves security relative to plain cloud hosting but offers no verifiable guarantee that the developer cannot rug or tamper with the application.
+	Stage 0 is the default starting point for every project.
+	Stage 1 – dev-proof
+	The developer can no longer unilaterally alter, censor, or exfiltrate sensitive data without a notice period. TEE integrity is cryptographically verifiable and all major trust links are visible to external parties.
+	The system is developer-proof — a compromised or malicious developer cannot violate the application’s stated integrity or privacy guarantees, though availability may still depend on them.
+	Stage 1 is something every project can reasonably be expected to achieve, even if it requires a little extra work/attention than the mvp prototype. Projects SHOULD reach Stage 1 before mainnet deployment.
+	Stage 2 – decentralized TEE network
+	Privilege is further distributed. Multiple enclaves, vendors, or governance actors share control so that no single party can censor, upgrade, or recover the system unilaterally.
+	The system reaches practical decentralization — integrity and privacy are preserved even under developer or vendor failure.
+	Stage 2 is what powerful projects should aspire to but might be a significant challenge. Only a mature project could be expected to reach it.
+
+
+	Stage 3 – trustless TEE
+	This is an envisioned speculative stage. Enclaves coordinate through cryptographic verification (e.g., TEE × ZK hybrids or multi-vendor cross-attestation) such that neither developers, cloud hosts, nor hardware vendors are single points of failure.
+	Achieve fully trustless confidential computation for TEE applications.
+	Stage 3 may be out of range of current techniques and only attainable after a breakthrough or community-wide effort.
+	
+
+
+
+Security stage guidelines
+Below are the requirements for Stage 1. Failing any of the following downgrades the project to Stage 0:
+
+
+Security stage 1 requirements
+
+
+* Enclaves are attested on-chain.
+* Project code is auditable through open-source or formal verification.
+* The community can reproducibly compute the code measurement.
+* The developer has no access to the application secrets.
+* There is a well-defined upgrade process with a notice period.
+* There is no dependency for integrity or privacy on centralized infrastructure (Vercel, etc.) except for the TEE vendors.
+* The project has no backdoor or debug paths.
+
+
+
+
+Here are the requirements for stage 1 to stage 3 in comparison: 
+
+
+
+
+	Stage 1 – dev-proof
+	Stage 2 – decentralized TEE network
+	Stage 3 – trustless TEE
+	On-chain attestation 
+	Yes
+	Yes
+	Yes
+	Code auditable through open-source or formal verification 
+	Yes
+	Yes
+	Yes
+	Reproducible code measurement
+	Yes
+	Yes
+	Yes
+	The developer has no access to the application secrets
+	Yes
+	Yes
+	Yes
+	Upgrade process
+	Notice period
+	DAO governance
+	DAO governance
+	No backdoor / debug paths
+	Yes
+	Yes
+	Yes
+	Not dependent on centralized infrastructure 
+	No
+	Yes 
+	Yes
+	Multi-TEE deployment for redundancy
+	No
+	Yes
+	Yes
+	Responsive to TCB updates
+	No
+	Yes
+	Yes
+	No vendor lock-in
+	No
+	Redundant enclaves across vendors (Intel TDX, AMD SEV, Nitro)
+	Redundant enclaves across vendors (Intel TDX, AMD SEV, Nitro)
+	Forward secrecy & data opt-out
+	No
+	Users can revoke consent and have obsolete data deleted.
+	Users can revoke consent and have obsolete data deleted.
+	Long-term reproducibility
+	No
+	Builds and attestations mirrored to prevent bit-rot.
+	Builds and attestations mirrored to prevent bit-rot.
+	Permissionless operation 
+	No
+	Any operator can join by meeting attestation criteria; availability independent of original dev.
+	Any operator can join by meeting attestation criteria; availability independent of original dev.
+	Override of vendor TCB
+	No
+	Governance can veto faulty Intel / AMD TCB info if proven compromised.
+	Governance can veto faulty Intel / AMD TCB info if proven compromised.
+	MPC DKG and signing
+	No
+	No
+	Yes
+	Independent of Intel sealing key
+	No
+	No
+	Yes
+	Indistinguishability Obfuscation
+	No
+	No
+	Yes
+	
+
+Conclusion
+TEEs bridge the scalability of cloud computing with the verifiability of blockchains. TEE-based systems bring verifiable computation within reach of everyday developers — enabling low-latency, privacy-preserving applications at Web2 scale with Web3 trust.
+ERC-733 establishes a unified framework for attestation, verification, and governance of off-chain secure computation. The security stage model provides a clear path from centralized prototypes to trustless networks.
+By integrating TEEs with Ethereum, both ecosystems benefit — TEEs gain transparency and governance, while Ethereum gains scalability and privacy. Together, they unlock the next generation of AI, finance, and governance applications.
+
+
+Community Consensus
+This draft has been shared with major TEE+EVM projects for feedback via calls and async discussions. Thank you to the participants (ordered alphabetically by project name):
+* Automata Network: @Gnnng Deli Gong, @yaoxin-jing Yaoxin Jing, @melynx Zheng Leong Chua
+* ERC-8004: @MarcoMetaMask Marco De Rossi
+* Oasis Network: Marko Stokić, @ptrus Peter Us
+* Phala Network: @h4x3rotab Hang Yin
+We invite anyone with questions or contributions to join the discussion at contact@erc733.org.
+
+
+
+
+________________
+Appendix A: TEE Deep Dive
+Cryptographic primitives
+TEE integrity relies on cryptographic and hardware primitives:
+* Cryptographic primitives: signature and measurement
+* Hardware primitives: hardwired public key and hardwired private key
+* Integrity verification patterns: verified execution and measured execution with remote attestation
+
+
+Cryptographic primitives: 
+Signature. A digital signature is produced by applying a private key to data, proving endorsement by the signer. With the public key shared, anyone can verify the signature. The endorsements can be chained – each certificate signs the next, forming an X.509 certificate chain. Vendors like Intel and Google share their root certificates, allowing any downstream signatures to be verified by walking up the chain.
+Measurement. In the field of TEE, one-way hash for software components, data or configs is called measurement. The software’s integrity can then be verified in two ways:
+1. Comparing against reference values. For deterministic measurement, the measurement value can be compared against reference values — or sometimes called golden values — to verify integrity.
+2. Replaying an event log. For nondeterministic measurement, an event log is shared so that anyone can verify that replaying the event log produces the measurement value. The event log is screened for anomalies. 
+Modern software integrity relies on two types of hardware burned keys: 
+Public key burned into chip: Vendors like Intel hardwire its public key in the CPU. Once burned, such keys can’t be modified. They are however not secrets and can be obtained from the vendor documentation.
+Private key burned into chip: Vendors like Intel also burn private keys into the silicon. Such keys are neither modifiable nor extractable. 
+
+
+	Modifiable?
+	Extractable?
+	Public key burned into chip
+	No
+	N/A — can be obtained from vendor documentation
+	Private key burned into chip
+	No
+	No
+	Using the above primitives, software integrity can be guaranteed in two ways:
+Verified execution: Before a piece of software is run, the code’s signature is verified against a certain vendor public key to ensure authenticity. For example, when a computer with Intel CPU boots, the CPU will first load Intel firmware – called ACM – from the flash memory and verify the firmware’s signature against the Intel’s public key burned into the CPU. If the verification fails the firmware is not allowed to run.
+Measured execution with remote attestation: During the execution of software, key components are measured into certain chip registers. The measurements are then signed using the chip’s hardwired private key, producing an attestation document, and shared. Anyone, including the on-chain contracts, can then walk up the X.509 chain to verify the authenticity of the document and verify the measurement values for software integrity. For example, software running inside an Intel TDX CPU are measured into the registers MRTD and RTMR0-3. The registers’ values are then signed using Intel’s hardwired private key and shared as an publicly verifiable attestation quote.
+
+
+Typical TEE configurations
+TEE systems can be categorized into bare metal machines and cloud-hosted. Cloud-hosted systems also can be categorized into those using open ecosystem chips from Intel and AMD and AWS’s solution using its own proprietary hardware. These configurations are reviewed in order with a comparison included at the end.
+
+
+Bare metal TEE
+Using Intel TDX as an example, this section first outlines a typical boot sequence and then explains how the workload integrity is guaranteed. The TEE protected computation runs as guest VMs — called Trusted Domain (TD) — in the host bare metal system. Each TD has its own isolated and tamper-resistant execution environment and measurement registers MRTD and RTMR0-3. Here is a typical boot up sequence:
+Host booting:
+
+
+1. UEFI. The CPU runs its hardwired microcode which eventually loads the UEFI from the flash memory.
+2. TDX module. The UEFI loads Intel SEAMLDR and TDX Module, verified against Intel public key. The TDX Module manages all TD lifecycle and isolation.
+3. OS. The UEFI loads the OS bootloader which loads the OS kernel. 
+4. VMM. A virtual machine manager (VMM) or hypervisor — such as QEMU and KVM — runs and is ready to create TDs.
+
+
+Guest booting:
+
+
+5. HOB. The VMM prepares the hand-off-block (HOB) for the TD — essentially the input to the TD including information such as the memory layout and hardware capabilities summarized in an ACPI table. 
+6. TDVF. The VMM loads the TD’s firmware — termed Trust Domain Virtual Firmware (TDVF). The VMM calls the TDX module to start the TD. The TDX module measures TDVF into the TD’s own MRTD register. TD starts and TDVF executes.
+7. Measuring HOB. TDVF reads the HOB and measures it into RTMR0.
+8. Bootloader. TDVF loads the guest OS bootloader and measures it into RTMR1.
+9. OS. The bootloader loads the guest OS and measures it into RTMR2. Guest OS runs.
+10. Workload. The workload — such as docker containers — runs, measured into RTMR3 using frameworks like dstack. An event log can be recorded for replay verification.
+
+
+Attestation and verification:
+ 
+11. Attestation. An attestation quote is generated by signing MRTD and RTMR0-3 using the CPU's attestation key, endorsed by Intel’s X.509 chain.
+12. Verification. A remote verifier verifies the authenticity of the quote and verifies integrity by comparing against reference values or replaying an event log.
+Here verified execution is used in step 2 and measured execution is used in step 6-10. The boot sequence can be illustrated in the following diagram:
+  
+
+Note that the guest system is fully measured:
+* The host-side firmware TDX module is measured against Intel public key and is guaranteed to be authentic.
+* The guest-side system components are fully measured into MRTD and RTMR0-3 for remote attestation. This means that any tampering can be easily detected by a remote verifier. Specifically, the measurement register values together with metadata like firmware versions are grouped together into an attestation document or attestation quote signed by Intel-provisioned on-chip private key. Because the key is endorsed by Intel’s X.509 chain, the attestation document’s authenticity can be cryptographically verified. Then anyone can verify the guest system’s integrity by comparing the register values to reference values or replaying the logs. 
+The guest system is called the Trusted Domain (TD) and its security depends on the security of all its supporting foundational components, the collection of which is called the Trusted Computing Base (TCB) 35. 
+TEE was designed with the philosophy that the guest system can execute with integrity even when the host is actively malicious. The guest system is measured and is verifiable independently of the host. Essentially, the host OS and the VMM are removed from the guest workload’s TCB.
+At the same time, the isolation of TEE is not perfect. Confidential data can be extracted through side channel attack, sometimes without physical access. A malicious host can load an older, signed-but-vulnerable TDX Module (rollback attack), mandating verifiers to check TCB version against TCBInfo 3 for deprecated versions. The HOB passed by the VMM is measured, but without known-good reference values, malicious content may go undetected. 
+In short, TEE significantly increases defense in depth, even if isolation is imperfect. The following table summarizes attacks that TEE can and cannot handle:
+
+
+	Prevented?
+	Detected?
+	Host reads TD memory
+	✅ Yes
+	N/A
+	Modified/malicious TDVF, HOB, OS, Workload
+	❌ No (it runs)
+	✅ Yes (measurement changes, detectable via reference values or event log analysis)
+	Side channel attack
+	❌ No
+	❌ No
+	
+
+Cloud-hosted Open Ecosystem TEE
+TEE allows users to verify workload integrity via attestation, without trusting the developer or operator. However, side-channel attacks from a malicious host remain a theoretical risk. Cloud-hosted TEE mitigates this concern: providers like Amazon, Microsoft, and Google have strong reputational and legal incentives not to attack customer workloads. Cloud TEE thus combines cryptographic guarantees with the operational trustworthiness of established providers.
+How can verifiers confirm a workload runs on cloud infrastructure? Cloud providers like Google and Microsoft provide cryptographic proof through a service called vTPM (Virtual Trusted Platform Module). Using Intel TDX as an example, the cloud provider produces both a TDX quote and a vTPM quote. The TDX quote proves the integrity of the guest system while the vTPM quote provides additional evidence. Because the vTPM quote is endorsed by the cloud provider’s X.509 chain, it essentially proves that the workload runs on the provider’s infrastructure.
+Note that the two quotes need to be cryptographically bound 36. On Microsoft Azure the TDX quote includes the vTPM’s attestation key in the REPORTDATA field. On Google Cloud this can be implemented by letting measured workload write TDX quote hash to the user data in the vTPM.
+
+
+AWS Nitro Enclaves
+AWS's TEE solution uses its own proprietary Nitro architecture rather than commodity Intel TDX or AMD SEV. In Nitro Enclaves, the code image is packaged as an Enclave Image File (EIF), and the secure enclave runs as an isolated VM carved out from a parent EC2 instance. The physical isolation is enforced by the Nitro Hypervisor — a minimal, purpose-built hypervisor that AWS controls end-to-end. 
+Unlike TDX CVMs which are full virtual machines, Nitro Enclaves have no direct network or disk access. All external communication must be proxied through the parent EC2 instance via vsock — a virtual socket for parent-enclave communication. For example, to make an HTTPS request, the enclave sends the request over vsock to a proxy running on the parent, which forwards it to the internet. 
+For attestation, Nitro Enclaves produce an attestation document containing PCR values (similar to RTMRs) that measure the enclave image, kernel, and application. The document is signed by the Nitro Hypervisor using credentials rooted in AWS's X.509 chain. 
+
+
+Comparison
+Here is a comparison of the three TEE setups: 
+
+
+
+
+	Bare Metal TEE
+	Cloud TEE
+	AWS Nitro Enclaves
+	Vendors to trust
+	Intel
+	Intel + Cloud provider
+	AWS
+	Side channel attack risk
+	High
+	Low
+	Low
+	Deployment options
+	Any bare metal machines 
+	Cloud providers only
+	AWS only
+	Workload environment
+	Full VM
+	Full VM
+	Docker container, no disk or network access, needs to go through vsock proxy
+	
+
+
+
+Appendix B: TEE Glossary
+
+
+Here is a summary of the TEE-related terminologies:
+
+
+Term
+	Definition
+	Attestation document, Attestation quote, Quote
+	Signed data structure containing measurements and metadata, produced by the CPU and endorsed by the CPU vendor’s X.509 chain. Different vendors use different names for the same concept: Intel TDX calls it a "TD Quote," AWS Nitro calls it an "Attestation Document," AMD SEV-SNP calls it an "Attestation Report." All serve the same purpose — proving software identity to verifiers.
+	Collaterals
+	Supporting data required to verify an attestation quote. For Intel TDX, this includes: TCBInfo 3 (trusted computing base version and status), QE Identity (Quoting Enclave measurements), PCK Certificate (platform provisioning key), Root CA Certificate (Intel's trust anchor), and CRL (certificate revocation list). Collaterals are published by the CPU vendor and must be available to verifiers — either fetched from vendor services or stored on-chain for decentralized verification.17
+	Enclave
+	TEE-isolated execution environment. Used generically to mean any TEE-protected workload.
+	Encumbered keys 
+	Key pairs generated inside a TEE enclave where the private key exists only within the enclave and cannot be extracted — not even by the developer or operator. The public key is included in the attestation, enabling verifiers to confirm that data signed by the private key genuinely originated from the attested enclave. A common pattern is generating an encumbered secp256k1 key, giving the enclave its own EVM wallet.
+	Golden value
+	Known-good measurement value. Verifiers compare attestation measurements against golden values to confirm expected software ran. A mismatch indicates tampering or misconfiguration.
+	Hypervisor, VMM
+	Virtual Machine Monitor. Software that manages virtual machines — "supervises supervisors" (OSes). Examples: QEMU/KVM, VMware ESXi, Xen. In TDX, the VMM is untrusted.
+	Measurement
+	One-way hash computed over code, data, or configuration. Stored in secure chip registers. Cannot be forged or reversed. Multiple measurements can be combined into one.
+	MRTD, RTMR, PCR
+	Measurement registers in different TEE architectures. MRTD (Measurement Register for Trust Domain) and RTMR (Runtime Measurement Registers 0-3) are used by Intel TDX. PCR (Platform Configuration Register) is used by AWS Nitro Enclaves, TPM, and vTPM. All store hash values representing software state.
+	Reference value
+	Trusted baseline data used to verify attestation. Can refer to: (1) golden measurement values for comparison, or (2) vendor-published security metadata like Intel's TCBInfo, which lists valid TCB versions and flags outdated or revoked firmware.
+	Side channel attack
+	Attack that extracts secrets through indirect observations — timing, power consumption, cache behavior, electromagnetic emissions — rather than direct memory access. TEEs protect against direct access but may still be vulnerable to side channels.
+	TCB
+	Trusted Computing Base. The set of all hardware, firmware, and software components that a workload relies on for its security. These components must be secured and free of vulnerabilities — a flaw in any TCB component can compromise the workload.
+	TD
+	Trust Domain. Intel TDX's term for a confidential VM. Isolated from VMM, host OS, and other TDs via hardware encryption and access controls.
+	TEE
+	Trusted Execution Environment. Hardware-isolated environment protecting code and data from external access, including from privileged software like the OS or hypervisor. Examples: Intel TDX, AMD SEV-SNP, AWS Nitro Enclaves.
+	TPM
+	Trusted Platform Module. A security chip standard dating back to 2003, predating modern TEE architectures. Physically separate from CPU. Measures the host system's boot process (BIOS, bootloader, host OS) — cannot measure guest VMs. Produces a signed "TPM Quote" containing PCR values, endorsed by the TPM vendor's X.509 chain and verifiable remotely. 
+	vTPM
+	Virtual TPM. Software TPM instance inside a VM that measures the guest's boot process — cannot measure the host. Provides standard TPM APIs, benefiting from mature tooling and wide developer familiarity. Supports runtime measurements via Linux IMA. In cloud TDX, certified by the cloud provider's CA to prove the VM runs on genuine cloud infrastructure.
+	X.509
+	Standard format for public key certificates. Used in attestation certificate chains to link hardware signatures back to vendor root CAs (Intel, AMD, AWS).
+	
+
+
+
+Here is an overview of the terminology across different TEE architectures:
+
+
+TEE 
+Architecture
+	Attestation Artifact
+	Measurement Terminology
+	Crypto Algorithms
+	Root of Trust / CA
+	AWS Nitro Enclaves
+	Attestation Document
+	PCRs (Platform Config Registers, like TPM)
+	ECDSA P-384
+	AWS Nitro Root CA → Intermediate CA → Enclave cert
+	Intel SGX
+	Quote / E-Quote
+	MRENCLAVE (code hash), MRSIGNER (signing key hash), ISVSVN (version)
+	EPID (legacy), ECDSA P-256
+	Intel Root CA or DCAP provisioning certs
+	Intel TDX
+	TD Quote
+	TD Measurement Registers (MRTD and RTMR0-3), TDREPORT
+	ECDSA P-384
+	Intel TDX Root CA
+	AMD SEV-SNP
+	Attestation Report
+	VCEK (Versioned Chip Endorsement Key), VMPL permissions, TCB version
+	ECDSA P-384
+	AMD Root CA → VCEK certs issued per chip/firmware
+	ARM CCA
+	Realm Attestation Report
+	Realm Measurement Registers (RIMs)
+	ECDSA P-384 (spec), possible EdDSA
+	Realm Attestation Service (RAS) root CA
+	
+
+Appendix C: On-chain Verification and Gas Optimizations
+TEE attestation can be directly verified on-chain. The verification can include up to four components: 
+1. TEE vendor endorsement — verifying the X.509 chain confirms authentic hardware 
+2. TCB status — checking against recalled/vulnerable hardware versions 
+3. Golden value match — confirming measurements link to trusted code 
+4. Cloud vendor endorsement — verifying the TEE runs on a reputable cloud platform, reducing host attack vectors
+
+
+For such verification to work on-chain, vendor collaterals such as vendor certificates must be cached on-chain. On-chain cached collaterals make TEE+EVM more transparent than traditional Web2 TEE. 
+
+
+Conducting such verification on-chain can be expensive due to the lack of EVM precompile support for signature curves used in TEE attestations — secp256r1 and secp384r1. For example, directly verifying a full secp384r1 Nitro Enclave X.509 endorsement on-chain can take up to 100m+ gas — several times the Ethereum transaction gas limit. Base’s on-chain Nitro Enclave attestation verification smart contract 37 is an example.
+
+
+This can be optimized by caching the vendor collaterals on-chain or by offloading the verification to off-chain computing using ZK or TEE. 
+
+
+* Collateral caching: Instead of verifying the entire X.509 chain, intermediate certificates can be cached on-chain to save redundant work. Automata on-chain PCCS 38 does this for Intel TEE attestations and the Base Nitro on-chain verifier 37 for Nitro Enclave.
+
+
+* ZK proof. The verification can be offloaded to an off-chain ZKVM for a 10-30x reduction in cost. Sparsity provides a tutorial on setting up ZKP verification workflow 39 with the underlying implementation provided by Automata for Intel DCAP 40 and Amazon Nitro Enclave 41. 
+
+
+* TEE proof. The verification can be offloaded to an off-chain TEE enclave for instant, low-cost verification. Like all TEE computation, it relies on the TEE vendor to be trustworthy. Phala provides a TEE validation demo for this pattern 42.
+
+
+Here is a comparison between the three optimization techniques:
+
+
+
+
+	On-chain certificate caching
+	ZK Proof
+	TEE Proof 
+	Trust assumption
+	Blockchain
+	Blockchain + ZKVM
+	Blockchain + TEE
+	Security
+	Most secure
+	Secure
+	Least secure
+	Cost
+	Highest cost, at least several millions of gas on-chain. Cost can be further optimized with P256/P384 precompile support.
+	Medium cost, off-chain ZK proving cost and on-chain verification cost (on the order of 250k gas). This improves year over year.
+	Negligible cost 
+	Delay
+	No delay
+	Proving time, which is on the order of 20 seconds. This improves year over year.
+	Negligible delay
+	Which one should I choose?
+	The default choice — prioritizes security with no additional trust assumptions. Choose alternatives if cost is prohibitive.
+	Choose this if the cost of fully-on-chain verification is too expensive.
+	Choose this if you want the lowest cost and delay, and accept TEE trust assumptions.
+	
+
+
+
+Appendix D: Measurement Determinism and Code Integrity
+Deterministic measurements allow one to trivially link attested deployment to trusted code by comparing measurements. In practice, however, it can be challenging to make measurement deterministic. The randomness comes from two sources — building and booting. 
+
+
+Most building systems like Docker are not designed with deterministic build — also called reproducible build — in mind. Factors like timestamp can creep into the building process, making it nondeterministic. Here are resources specifically aiming at deterministic build:
+
+
+* NixOS reproducible builds 43
+* Flashbots meta confidential computing 44
+* The Yocto project 45
+* Oasis TDX boot image using Yocto 46
+
+
+If deterministic building is not feasible, we can rely on trusted third parties to release authoritative builds. For example, GitHub Actions signed by Sigstore 47 is a popular choice. The developer uses GitHub Actions to build code tied to a specific git commit hash and the entire building process — including the output image — is endorsed by Sigstore. Sigstore is a Linux foundation project with participation from industry giants like Google, HP, Redhat and Cisco. It operates under a trust model similar to permissioned blockchain — all parties need to collude to cheat. Here is a reference implementation from Sparsity 48.
+
+
+Similarly, the booting process can lead to nondeterministic measurements. One mitigation is to record and share the boot events log so that anyone can replay the log to ensure that it doesn’t contain suspicious steps. Such replaying needs to be done off-chain for each deployment. [TODO: find a RI] 
+
+
+
+
+Appendix E: Secure and Highly Available KMS
+KMS holds secrets for many applications, making it a high-value target that justifies expensive attacks such as side-channel exploitation. As a general purpose computing paradigm 49,50, MPC can mitigate this risk by distributing secrets across multiple enclaves 51 — so a few compromised enclaves won't leak the secrets
+
+
+MPC can harden applications themselves — secrets are split across enclaves so no single compromise leaks them. As a general tool to harden confidentiality, MPC can be applied to TEE+EVM applications in three tiers of strength:
+
+
+
+
+	Description
+	Attack vector
+	Protection Level
+	Cost
+	MPC for KMS
+	KMS uses MPC to distribute secret shares. Application enclaves don’t use MPC.
+	Compromising any application enclave leaks application secrets.
+	High
+	Acceptable
+	MPC for secrets in application enclaves
+	The application enclaves themselves use MPC to generate and distribute the secrets shares and use MPC to sign and encrypt/decrypt data.
+	Compromising any application enclave leaks application data, but not secrets.
+	Higher
+	Higher
+	Full application in MPC
+	The entire application is implemented in MPC. 
+	Need to compromise all application enclave to leak anything
+	Extremely high
+	Extremely high
+	
+
+MPC addresses security. For availability, Intel SGX offers another tool: the sealing key. In the rare case where all KMS enclaves go offline (e.g., large-scale power outages), the sealing key enables recovery.
+The sealing key is private to the enclave and never shared. It can be used to encrypt data stored persistently outside the enclave and decrypt it later. If an enclave goes offline, it will obtain the same sealing key upon reboot as long as the code measurement stays the same.
+This means that in the rare case where all KMS enclaves go offline, recovery is possible — bring back the SGX enclaves with the same code measurement and they will derive the same sealing keys to decrypt the mission-critical secrets. 
+Note that the sealing key feature has been removed in Intel TDX and it may return.
+
+
+
+
+Appendix F: List of All Reference Implementations
+
+
+Attestation Layer
+Flashtestations — Intel TDX attestation for block builders. 
+Dstack TEE — TEE development framework. 
+Oasis ROFL — Runtime Off-chain Logic. 
+Automata On-chain PCCS — On-chain collateral caching for Intel TEE attestations. 
+Automata CVM Registry — On-chain confidential VM registry.
+Flashtestations Registry — On-chain registry for attested enclaves. 
+Sparsity TEE Registry — On-chain TEE registry reference implementation
+Base Nitro Attestation — On-chain Nitro Enclave attestation verification
+
+
+On-chain Verification Optimizations
+Automata DCAP — ZK proof for Intel DCAP attestation verification. 
+Automata Nitro — ZK proof for AWS Nitro Enclave verification. 
+Sparsity ZKP Tutorial — ZKP verification workflow setup
+Phala TEE Validator Demo — Pre-authenticated validator oracles
+
+
+Reproducible Build Tools
+NixOS Reproducible Builds — Reproducible build tooling. 
+Flashbots Meta Confidential Compute — Reproducible build framework for TEE applications. 
+Yocto Project — Reproducible Linux build system. 
+Oasis TDX Boot Image — TDX boot image using Yocto. 
+Sigstore — Supply chain attestation for non-reproducible builds. 
+Sparsity App Hub — SLSA Level 3 builds with GitHub Actions and Sigstore
+________________
+
+
+Replication Layer
+Replicatoor — Enclave-to-enclave secret replication for Dstack. 
+Helios — Ethereum light client for running inside enclaves. 
+Dstack Update Demo — App update governance with user opt-out. 
+Dstack KMS — Key management service for TEE applications. 
+Oasis Key Management — Decentralized key management. 
+Lit Protocol — Distributed key management network. 
+________________
+
+
+Interoperability Layer
+Dstack Gateway — Reverse proxy routing DNS to on-chain ENS names. 
+Sparsity Nova Template — Frontend served from enclave
+________________
+
+
+Applications
+Trustless Agents
+Talos — Trustless AI agent framework with upgrade governance. 
+
+
+Oracles
+Switchboard — TEE-based oracle network. 
+Town Crier — Early TEE oracle research.
+Dstack Oracle Tutorial — TEE-based oracle tutorial.
+
+
+Bridges
+Avalanche Bridge — MPC network with TEE nodes ("Wardens") for cross-chain verification. 
+pNetwork — MPC+TEE arbitrary messaging bridge. 
+Bool Network — MPC+TEE arbitrary messaging bridge. 
+LCP Network — Light client committee running in TEE enclaves. 
+Liquefaction — Academic research on TEE-based bridges. 
+
+
+Fintech
+Cycles — Debt resolution algorithms running inside TEEs. 
+PASS: A Provenanced Access Subaccount System for Blockchain Wallets 
+
+
+
+
+References 
+
+
+1.        Li, R., Wang, Q., Wang, Q., Galindo, D. & Ryan, M. SoK: TEE-assisted Confidential Smart Contract. Preprint at https://doi.org/10.48550/arXiv.2203.08548 (2022). 
+2.        Li, R. et al. Bringing Smart Contract Confidentiality via Trusted Hardware: Fact and Fiction. Trans Info Sec 20, 159–174 (2025). 
+3.        API Documentation - Intel® SGX and Intel® TDX services - Production environment. https://api.portal.trustedservices.intel.com/content/documentation.html. 
+4.        ERC-8004: Trustless Agents. https://8004.org/. 
+5.        TEE draft for 8004 v2. Google Docs https://docs.google.com/document/d/127pkxlBE0048N-MNsX66Ctz5dmRxHvaJRASAr01EVVc/edit?tab=t.0&usp=embed_facebook. 
+6.        Talos | talos. https://docs.talos.is (2025). 
+7.        How a Hyperliquid whale lost $100m on leveraged Bitcoin bet – DL News. https://www.dlnews.com/articles/defi/hyperliquid-whale-loses-100m-on-leveraged-bitcoin-bet/. 
+8.        Cycles: Respect the Graph. Cycles https://cycles.money/. 
+9.        Yu, J., Zhou, S., Yin, H. & Seong, B. PASS: A Provenanced Access Subaccount System for Blockchain Wallets. 
+10.        Switchboard | The Everything Oracle. https://switchboard.xyz/. 
+11.        Town Crier on Chainlink Ecosystem | Every Chainlink integration and partnership. https://www.chainlinkecosystem.com/ecosystem/town-crier. 
+12.        Dstack oracle tutorial by Andrew Miller. https://github.com/amiller/dstack-tutorial. 
+13.        How does the Avalanche BridgeTM work? | Avalanche Support. https://support.avax.network/en/articles/6349640-how-does-the-avalanche-bridge-work. 
+14.        pNetwork v4 Release: Build Your Own Bridge. https://mirror.xyz/10/0x4088a34f040acb310f10baf7f6490c9d9b67f463/render. 
+15.        Bool Network. https://bool.network/. 
+16.        LCP - Empowering light client verification leveraging TEEs and ZKPs. https://lcp-landing-page.webflow.io/. 
+17.        Austgen, J. et al. Liquefaction: Privately Liquefying Blockchain Assets. Preprint at https://doi.org/10.48550/arXiv.2412.02634 (2024). 
+18.        flashbots/flashtestations. https://github.com/flashbots/flashtestations (2025). 
+19.        Dstack TEE. https://github.com/Dstack-TEE/dstack. 
+20.        Runtime Off-Chain Logic (ROFL) | Oasis Documentation. https://docs.oasis.io/build/rofl/ (2025). 
+21.        ERC-721. https://ethereum.org/developers/docs/standards/tokens/erc-721/. 
+22.        On-chain CVM registry from Automata. https://github.com/automata-network/automata-tee-workload-measurement. 
+23.        Flashtestations registry. https://github.com/flashbots/flashtestations/blob/main/src/FlashtestationRegistry.sol. 
+24.        sparsity-xyz/tee-registry-RI. https://github.com/sparsity-xyz/tee-registry-RI. 
+25.        a16z/helios: A fast, secure, and portable multichain light client for Ethereum. https://github.com/a16z/helios. 
+26.        Replicatoor - upgrade controlled migration module for Dstack - TEE - Trusted Execution Environment. The Flashbots Collective https://collective.flashbots.net/t/replicatoor-upgrade-controlled-migration-module-for-dstack/4148 (2024). 
+27.        Decentralized Key Management: Securing the Autonomy of DeFi Agents. https://oasis.net/blog/decentralized-key-management-agents. 
+28.        dstack/kms at master · Dstack-TEE/dstack. GitHub https://github.com/Dstack-TEE/dstack/tree/master/kms. 
+29.        Lit Protocol. GitHub https://github.com/LIT-Protocol. 
+30.        dstack/demo at update-demo · njeans/dstack. GitHub https://github.com/njeans/dstack/tree/update-demo/demo. 
+31.        dstack/gateway at master · Dstack-TEE/dstack. GitHub https://github.com/Dstack-TEE/dstack/tree/master/gateway. 
+32.        sparsity-xyz/nova-app-template. https://github.com/sparsity-xyz/nova-app-template (2026). 
+33.        Uniswap Interface. https://app.uniswap.org/. 
+34.        Jean-Louis, N. et al. SGXonerated: Finding (and Partially Fixing) Privacy Flaws in TEE-based Smart Contract Platforms Without Breaking the TEE. Preprint at https://eprint.iacr.org/2023/378 (2023). 
+35.        TCB Components -- Intel. https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/best-practices/trusted-computing-base-recovery.html. 
+36.        Filip Rezabek, Moe Mahhouk, Andrew Miller, Stefan Genchev, Quintus Kilbourn, Georg Carle, Jonathan Passerat-Palmbach. Proof of Cloud: Data Center Execution Assurance for Confidential VMs. Preprint at https://arxiv.org/abs/2510.12469. 
+37.        base/nitro-validator. https://github.com/base/nitro-validator (2026). 
+38.        automata-network/automata-on-chain-pccs. https://github.com/automata-network/automata-on-chain-pccs (2025). 
+39.        sparsity-xyz/tee-zkp. https://github.com/sparsity-xyz/tee-zkp (2026). 
+40.        automata-network/dcap-rs. https://github.com/automata-network/dcap-rs (2025). 
+41.        automata-network/aws-nitro-enclave-attestation. https://github.com/automata-network/aws-nitro-enclave-attestation. 
+42.        chaoschain-genesis-studio/TEE_VALIDATION_DEMO.md at tee-validator · shelvenzhou/chaoschain-genesis-studio. GitHub https://github.com/shelvenzhou/chaoschain-genesis-studio/blob/tee-validator/TEE_VALIDATION_DEMO.md. 
+43.        NixOS Reproducible Builds. https://reproducible.nixos.org/. 
+44.        flashbots/meta-confidential-compute. https://github.com/flashbots/meta-confidential-compute (2025). 
+45.        Yocto Project Linux Kernel Development Manual — The Yocto Project ® 5.2.999 documentation. https://docs.yoctoproject.org/kernel-dev/index.html. 
+46.        Oasis VM images for Intel TDX. https://github.com/oasisprotocol/oasis-boot. 
+47.        Why we’re excited about the Sigstore general availability. https://github.blog/security/supply-chain-security/why-were-excited-about-the-sigstore-general-availability/. 
+48.        sparsity-xyz/sparsity-nova-app-hub. https://github.com/sparsity-xyz/sparsity-nova-app-hub (2026). 
+49.        Goldreich, O., Micali, S. & Wigderson, A. How to play ANY mental game. in Proceedings of the nineteenth annual ACM symposium on Theory of computing 218–229 (Association for Computing Machinery, New York, NY, USA, 1987). doi:10.1145/28395.28420. 
+50.        Beaver, D., Micali, S. & Rogaway, P. The round complexity of secure protocols. in Proceedings of the twenty-second annual ACM symposium on Theory of Computing 503–513 (Association for Computing Machinery, New York, NY, USA, 1990). doi:10.1145/100216.100287. 
+51.        Shamir, A. How to share a secret. Commun ACM 22, 612–613 (1979). 
+
+
+
+
+Latest draft: https://draftv4.erc733.org
+
+
+
+
+[a]I have been working on some clearer but nuanced explanation of the trust model correspondence between web3 and TEE.  Because TEE today is a very strong trust-requiring model in clouds&manufacturers. However it still does its just. The most important thing in both EVM and in TEE imo is removing trust in the app developer. So it's definitely about trust-aware design, it isn't exactly removing trust, but it does manage where it fits.
+
+
+Most importantly, it creates a role of "no trust  application developer" that captures permissionless innovation and a low barrier to entry. Because even in other cloud and ai environments that make the barrier to entry lower for developers, having to build a trusted reputation is still a big barrier, which TEE removes. All the above is the case whether there is trust in cryptoeconomic social process or trust in manufacturer&cloud tension. "Don't have to trust the app developer" is key
+[b]Great point — incorporated! "Don't have to trust the app developer" is a much cleaner framing.
+[c]@yoongbok@sparsity.xyz please clean up our source code with docs and tutorial --- run simple one node case, scale up. Deliverable: polished repo ready to made public
+[d]@yoongbok@sparsity.xyz , please go through this tutorial --- it has not only oracle pattern, but also features like upgradability and KMS. Pay attention to 1. any pattern can be integrated into 733. 2. How does it overlap with our RNG/price oracles, is there still value to include our own example(s) as RI(s) here.
+[e]including git commit hash and Github Action url if using SLSA
+[f]Here is another: https://github.com/near/mpc
+[g]@yoongbok@sparsity.xyz In the registry RI you created, does it include time lock and DAO governance?
+[h]yes
+[i]@yoongbok@sparsity.xyz , please go through this tutorial --- it has not only oracle pattern, but also features like upgradability and KMS. Pay attention to 1. any pattern can be integrated into 733. 2. How does it overlap with our RNG/price oracles, is there still value to include our own example(s) as RI(s) here.

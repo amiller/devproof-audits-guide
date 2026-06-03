@@ -1,0 +1,10 @@
+# Cloned third-party source — re-fetch with:
+#   git clone https://github.com/Layr-Labs/d-inference.git repo
+#   (cd repo && git checkout cf4c0ef)
+repo/
+
+# Downloaded release artifact + extracted contents — re-fetch with:
+#   curl -fsSL -o verify/eigeninference-bundle-v0.4.7.tar.gz \
+#     https://pub-3d1cb668259340eeb2276e1d375c846d.r2.dev/releases/v0.4.7/eigeninference-bundle-macos-arm64.tar.gz
+verify/eigeninference-bundle-v0.4.7.tar.gz
+verify/bundle/

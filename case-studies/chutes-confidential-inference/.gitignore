@@ -1,0 +1,12 @@
+# Cloned third-party source — untracked. Org renamed rayonlabs -> chutesai (301 redirect).
+# Re-fetch with:
+#   mkdir -p refs && cd refs
+#   git clone https://github.com/chutesai/chutes.git        && (cd chutes        && git checkout 08d79872)
+#   git clone https://github.com/chutesai/chutes-api.git    && (cd chutes-api    && git checkout 77b6f355)
+#   git clone https://github.com/chutesai/chutes-miner.git  && (cd chutes-miner  && git checkout 7afea4b1)
+#   git clone https://github.com/chutesai/sek8s.git         && (cd sek8s         && git checkout 255596da)  # TDX guest build
+refs/
+
+# Live API key — never commit
+verify/ck
+verify/*.key

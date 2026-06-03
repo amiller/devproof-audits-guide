@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEAR Private Chat: Attestation Verification Gap Analysis</title>
+<style>
+  :root {
+    --bg: #faf5f0;
+    --surface: #ffffff;
+    --surface-alt: #f3ede6;
+    --border: #e0d5c8;
+    --text: #3d3229;
+    --text-muted: #8a7968;
+    --heading: #2c241c;
+    --accent: #c47a5a;
+    --accent-light: #f5e6de;
+    --green: #6b9a6b;
+    --green-light: #e8f2e8;
+    --red: #c45a5a;
+    --red-light: #fae6e6;
+    --yellow: #b8953e;
+    --yellow-light: #faf3e0;
+    --blue: #5a7ac4;
+    --blue-light: #e6eefa;
+    --code-bg: #f0ebe4;
+    --code-text: #3d3229;
+    --code-comment: #8a7968;
+    --code-keyword: #9b5030;
+    --code-string: #4a7a4a;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Georgia', 'Times New Roman', serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 16px;
+  }
+
+  .container {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 3rem 2rem;
+  }
+
+  /* Header */
+  .report-header {
+    text-align: center;
+    padding: 3rem 2rem;
+    margin-bottom: 2rem;
+    border-bottom: 2px solid var(--border);
+  }
+
+  .report-header h1 {
+    font-size: 2rem;
+    color: var(--heading);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.5rem;
+  }
+
+  .report-header .subtitle {
+    font-size: 1.1rem;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-top: 1.5rem;
+    text-align: left;
+  }
+
+  .meta-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+  }
+
+  .meta-item .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    font-family: system-ui, sans-serif;
+  }
+
+  .meta-item .value {
+    font-size: 0.9rem;
+    color: var(--heading);
+    font-weight: 600;
+  }
+
+  .meta-item .value a {
+    color: var(--blue);
+    text-decoration: none;
+  }
+
+  .meta-item .value code {
+    font-size: 0.8rem;
+    background: var(--surface-alt);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+  }
+
+  /* Sections */
+  section {
+    margin-bottom: 3rem;
+  }
+
+  h2 {
+    font-size: 1.5rem;
+    color: var(--heading);
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+
+  h2 .section-num {
+    color: var(--accent);
+    margin-right: 0.3em;
+  }
+
+  h3 {
+    font-size: 1.15rem;
+    color: var(--heading);
+    margin: 1.5rem 0 0.75rem;
+    font-weight: 600;
+  }
+
+  p {
+    margin-bottom: 1rem;
+  }
+
+  a { color: var(--blue); }
+
+  strong { color: var(--heading); }
+
+  /* Architecture diagram */
+  .architecture-diagram {
+    background: #f7f3ee;
+    color: var(--text);
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    padding: 1.5rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    overflow-x: auto;
+    margin: 1.5rem 0;
+    white-space: pre;
+  }
+
+  .architecture-diagram .verified {
+    color: #3d7a3d;
+  }
+
+  .architecture-diagram .unverified {
+    color: var(--red);
+  }
+
+  .architecture-diagram .label-text {
+    color: var(--text-muted);
+  }
+
+  /* Code blocks */
+  pre {
+    background: var(--code-bg);
+    color: var(--code-text);
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    padding: 1.25rem 1.5rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    overflow-x: auto;
+    margin: 1rem 0 1.5rem;
+  }
+
+  code {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 0.88em;
+    background: var(--surface-alt);
+    padding: 0.15em 0.35em;
+    border-radius: 3px;
+    color: var(--accent);
+  }
+
+  pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+    font-size: inherit;
+  }
+
+  .kw { color: var(--code-keyword); }
+  .str { color: var(--code-string); }
+  .cmt { color: var(--code-comment); font-style: italic; }
+  .fn { color: #4a6a8a; }
+
+  /* Callout boxes */
+  .callout {
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin: 1.25rem 0;
+    border-left: 4px solid;
+  }
+
+  .callout-verified {
+    background: var(--green-light);
+    border-color: var(--green);
+  }
+
+  .callout-gap {
+    background: var(--red-light);
+    border-color: var(--red);
+  }
+
+  .callout-info {
+    background: var(--blue-light);
+    border-color: var(--blue);
+  }
+
+  .callout-warn {
+    background: var(--yellow-light);
+    border-color: var(--yellow);
+  }
+
+  .callout .callout-title {
+    font-weight: 700;
+    font-family: system-ui, sans-serif;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.4rem;
+  }
+
+  .callout-verified .callout-title { color: var(--green); }
+  .callout-gap .callout-title { color: var(--red); }
+  .callout-info .callout-title { color: var(--blue); }
+  .callout-warn .callout-title { color: var(--yellow); }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0 1.5rem;
+    font-size: 0.9rem;
+  }
+
+  thead {
+    background: var(--surface-alt);
+  }
+
+  th {
+    font-family: system-ui, sans-serif;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    border-bottom: 2px solid var(--border);
+    font-weight: 600;
+  }
+
+  td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  .status-improved { color: var(--green); font-weight: 600; }
+  .status-same { color: var(--red); font-weight: 600; }
+  .status-worse { color: var(--red); font-weight: 700; }
+  .status-fixed { color: var(--green); font-weight: 600; }
+
+  /* Step indicators */
+  .step {
+    display: flex;
+    gap: 1rem;
+    margin: 1rem 0;
+    align-items: flex-start;
+  }
+
+  .step-num {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, sans-serif;
+    font-size: 0.8rem;
+    font-weight: 700;
+    margin-top: 0.15rem;
+  }
+
+  .step-content {
+    flex: 1;
+  }
+
+  .step-content .step-title {
+    font-weight: 700;
+    color: var(--heading);
+  }
+
+  .step-content .step-link {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 0.82rem;
+  }
+
+  /* Source reference list */
+  .ref-table {
+    font-size: 0.88rem;
+  }
+
+  .ref-table td:first-child {
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--heading);
+  }
+
+  .ref-table code {
+    font-size: 0.8rem;
+  }
+
+  /* Lists */
+  ul, ol {
+    margin: 0.5rem 0 1rem 1.5rem;
+  }
+
+  li {
+    margin-bottom: 0.4rem;
+  }
+
+  /* Blockquote */
+  blockquote {
+    border-left: 3px solid var(--accent);
+    padding: 0.75rem 1.25rem;
+    margin: 1rem 0;
+    background: var(--accent-light);
+    border-radius: 0 8px 8px 0;
+    font-style: italic;
+    color: var(--text);
+  }
+
+  blockquote a { color: var(--blue); }
+
+  /* Timeline */
+  .timeline {
+    position: relative;
+    padding-left: 2rem;
+  }
+
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+
+  .timeline-entry {
+    position: relative;
+    margin-bottom: 1.25rem;
+    padding-left: 1rem;
+  }
+
+  .timeline-entry::before {
+    content: '';
+    position: absolute;
+    left: -2rem;
+    top: 0.45rem;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--border);
+    border: 2px solid var(--bg);
+  }
+
+  .timeline-entry.highlight::before {
+    background: var(--red);
+    width: 12px;
+    height: 12px;
+    left: calc(-2rem - 1px);
+  }
+
+  .timeline-entry.audit::before {
+    background: var(--accent);
+    width: 12px;
+    height: 12px;
+    left: calc(-2rem - 1px);
+  }
+
+  .timeline-entry.good::before {
+    background: var(--green);
+  }
+
+  .timeline-date {
+    font-family: system-ui, sans-serif;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .timeline-title {
+    font-weight: 600;
+    color: var(--heading);
+  }
+
+  .timeline-detail {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+  }
+
+  /* Footer */
+  .report-footer {
+    margin-top: 3rem;
+    padding-top: 2rem;
+    border-top: 2px solid var(--border);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+  }
+
+  @media (max-width: 640px) {
+    .container { padding: 1.5rem 1rem; }
+    .report-header h1 { font-size: 1.5rem; }
+    .meta-grid { grid-template-columns: 1fr; }
+    pre { font-size: 0.72rem; padding: 1rem; }
+    .architecture-diagram { font-size: 0.65rem; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="report-header">
+  <h1>NEAR Private Chat</h1>
+  <div class="subtitle">Attestation Verification Gap Analysis</div>
+  <div class="meta-grid">
+    <div class="meta-item">
+      <div class="label">Date</div>
+      <div class="value">2026-04-03</div>
+    </div>
+    <div class="meta-item">
+      <div class="label">Pinned to</div>
+      <div class="value"><code>prod-20260402</code> &mdash; <a href="https://github.com/nearai/cloud-api/tree/2cb48d2c54da794217ee31f730dbbf94b977c8f0"><code>2cb48d2c54da</code></a></div>
+    </div>
+    <div class="meta-item">
+      <div class="label">Prior Audit</div>
+      <div class="value">2026-01-09 &mdash; <a href="https://github.com/nearai/cloud-api/tree/80e73e254485c4d59c19335eb33c1e98035bafac"><code>80e73e25</code></a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">1.</span> Architecture Overview</h2>
+
+<p>NEAR Private Chat claims "verifiably private" AI conversations. The system runs in Intel TDX Trusted Execution Environments (TEEs) using the dstack framework. The architecture has four layers:</p>
+
+<div class="architecture-diagram"><span class="verified">┌─────────────────────────────────────────────────────────────────────┐
+│  User Browser                                                       │
+│  Sends chat messages via HTTPS                                      │
+└────────────────────────┬────────────────────────────────────────────┘</span>
+                         │ <span class="label-text">TLS (Let's Encrypt cert bound to TDX quote)</span>
+                         ▼
+<span class="verified">┌─────────────────────────────────────────────────────────────────────┐
+│  dstack-ingress CVM          (app_id: 000b2d32...ed6dea69)         │
+│  TLS termination + nginx reverse proxy                              │
+│  Attestation: /evidences/ (TLS cert hash = TDX report_data)        │
+└────────────────────────┬────────────────────────────────────────────┘</span>
+                         │ <span class="label-text">Tailscale VPC (encrypted mesh)</span>
+                         ▼
+<span class="verified">┌─────────────────────────────────────────────────────────────────────┐
+│  chat-api CVMs               (app_id: f723e96a...2113f63b0c)       │
+│  Rust chat backend                                                  │
+│  OPENAI_BASE_URL=https://cloud-api.near.ai/v1  ← HARDCODED        │
+│  Attestation: /v1/attestation/report                                │
+└────────────────────────┬────────────────────────────────────────────┘</span>
+                         │ <span class="label-text">HTTPS to cloud-api.near.ai (via ingress)</span>
+                         ▼
+<span class="verified">┌─────────────────────────────────────────────────────────────────────┐
+│  cloud-api CVM               (app_id: f550fdfb...4a4431ae)         │
+│  Inference routing gateway                                          │
+│  Reads inference_url from database per model                        │
+│  Attestation: /v1/attestation/report                                │
+└────────────────────────┬────────────────────────────────────────────┘</span>
+                         │ <span class="label-text">HTTPS to inference_url (operator-configured)</span>
+                         ▼
+<span class="unverified">┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+  vLLM / SGLang backends
+  Run models, return completions
+  Expose /v1/attestation/report
+  ← ATTESTATION FETCHED BUT NEVER VERIFIED BY CLOUD-API
+└ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘</span></div>
+
+<p>The top three layers form the <strong>outer boundary</strong> &mdash; verifiable by users via attestation endpoints. The bottom layer is the <strong>inner boundary</strong> &mdash; where user conversations are sent to inference backends that cloud-api does not cryptographically verify.</p>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">2.</span> The Outer Boundary (What Works)</h2>
+
+<p>This section documents the verified trust chain from browser to cloud-api. Each link is independently verifiable.</p>
+
+<h3>2.1 TLS &rarr; TEE Binding</h3>
+
+<div class="callout callout-verified">
+  <div class="callout-title">Verified</div>
+  The TLS certificate served at <code>private.near.ai</code> is cryptographically bound to the dstack-ingress TEE attestation via TDX <code>report_data</code>.
+</div>
+
+<ol>
+  <li>dstack-ingress generates a Let's Encrypt certificate inside the TEE</li>
+  <li>It hashes all evidence files (including the TLS cert) into <code>sha256sum.txt</code></li>
+  <li>The SHA256 of <code>sha256sum.txt</code> becomes the <code>report_data</code> in the TDX quote</li>
+</ol>
+
+<pre><code><span class="cmt"># Verify the binding</span>
+EVIDENCE_HASH=$(curl -s https://private.near.ai/evidences/sha256sum.txt | sha256sum | cut -d' ' -f1)
+QUOTE_DATA=$(curl -s https://private.near.ai/evidences/quote.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['report_data'][:64])")
+[ "$EVIDENCE_HASH" = "$QUOTE_DATA" ] &amp;&amp; echo <span class="str">"MATCH"</span> || echo <span class="str">"MISMATCH"</span></code></pre>
+
+<h3>2.2 chat-api &rarr; cloud-api Routing</h3>
+
+<div class="callout callout-verified">
+  <div class="callout-title">Verified</div>
+  <code>OPENAI_BASE_URL</code> is hardcoded in the docker-compose embedded in the attestation. It is <strong>not</strong> in <code>allowed_envs</code>, so the operator cannot change it at runtime.
+</div>
+
+<pre><code>curl -s https://private.near.ai/v1/attestation/report | \
+  python3 -c <span class="str">"
+import sys,json
+d=json.load(sys.stdin)
+ac=json.loads(d['chat_api_gateway_attestation']['info']['tcb_info']['app_compose'])
+dcf=ac['docker_compose_file']
+for line in dcf.split('\n'):
+    if 'OPENAI_BASE_URL' in line: print(line.strip())
+print('In allowed_envs:', 'OPENAI_BASE_URL' in ac.get('allowed_envs',[]))
+"</span>
+<span class="cmt"># OPENAI_BASE_URL=https://cloud-api.near.ai/v1
+# In allowed_envs: False</span></code></pre>
+
+<h3>2.3 Compose Hash Enforcement</h3>
+
+<p>Each CVM's code is locked to a specific compose hash registered on-chain in a DstackApp contract on Base. The dstack KMS will not release encryption keys to a CVM whose compose hash is not whitelisted.</p>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Limitation</div>
+  The contracts are not source-verified on Basescan, so we cannot confirm the governance logic (who can add new hashes, whether there's a backdoor).
+</div>
+
+<h3>2.4 What Users Can Verify</h3>
+
+<ul>
+  <li>The TLS cert they're connected to matches the one attested by the TEE</li>
+  <li>The code running in chat-api is locked to a specific compose hash</li>
+  <li>That compose hash hardcodes <code>OPENAI_BASE_URL=https://cloud-api.near.ai/v1</code></li>
+  <li>cloud-api is also attested and locked to a compose hash</li>
+</ul>
+
+<div class="callout callout-gap">
+  <div class="callout-title">What users cannot verify</div>
+  What happens after cloud-api receives their request &mdash; specifically, which vLLM backends receive their conversation data.
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">3.</span> The Inner Boundary (The Gap)</h2>
+
+<p>This section traces the exact code path by which user conversations are routed to inference backends, and demonstrates that no cryptographic verification occurs.</p>
+
+<h3>3.1 How cloud-api Discovers Backends</h3>
+
+<p>Previously (before 2026-03-26), cloud-api used <code>MODEL_DISCOVERY_SERVER_URL</code> &mdash; a runtime-configurable environment variable &mdash; to poll an external discovery service. <a href="https://github.com/nearai/cloud-api/pull/513">PR #513</a> removed this, replacing it with database-driven routing.</p>
+
+<p>Now, each model has an <code>inference_url</code> column in the database, set by the operator:</p>
+
+<p><strong><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L1328-L1450"><code>inference_provider_pool/mod.rs:1328-1450</code></a></strong> &mdash; <code>load_inference_url_models()</code></p>
+
+<pre><code><span class="cmt">For each (model_name, inference_url) from database:</span>
+  1. If URL unchanged from last load → reuse existing VLlmProvider
+  2. If new URL → create VLlmProvider::new(url, api_key)
+  3. Probe attestation: fetch signing public keys from backend
+  4. Add provider to model_to_providers and pubkey_to_providers maps</code></pre>
+
+<p>The <code>inference_url</code> values are controlled entirely by the database, which is controlled by the operator. The compose hash does not constrain them.</p>
+
+<h3>3.2 How a Chat Request Reaches a Backend</h3>
+
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-content">
+    <span class="step-title">HTTP handler</span> &mdash;
+    <span class="step-link"><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/api/src/routes/completions.rs#L305-L527">completions.rs:305-527</a></span>
+    <br>Validates API key, extracts encryption headers, converts to internal request
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-content">
+    <span class="step-title">Completions service</span> &mdash;
+    <span class="step-link"><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/completions/mod.rs#L1004-L1165">completions/mod.rs:1004-1165</a></span>
+    <br>Resolves model name, checks quota, calls <code>inference_provider_pool.chat_completion_stream()</code>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-content">
+    <span class="step-title">Provider selection</span> &mdash;
+    <span class="step-link"><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L572-L776">inference_provider_pool/mod.rs:572-776</a></span>
+    <br>Looks up providers for the model, filters by E2EE pub key, applies round-robin, retries on failure
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-content">
+    <span class="step-title">Backend request</span> &mdash;
+    <span class="step-link"><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/inference_providers/src/vllm/mod.rs">vllm/mod.rs</a></span>
+    <br>Creates HTTP POST to <code>{inference_url}/v1/chat/completions</code>, sends user's full conversation as JSON body
+  </div>
+</div>
+
+<div class="callout callout-gap">
+  <div class="callout-title">No verification anywhere in this chain</div>
+  At no point is the backend's identity cryptographically verified. The only gate is: "does this URL appear in the database?"
+</div>
+
+<h3>3.3 The Attestation Fetch (Zero Verification)</h3>
+
+<p>When cloud-api loads a backend, it fetches an attestation report from it. Here is the complete implementation:</p>
+
+<p><strong><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/inference_providers/src/vllm/mod.rs#L307-L376"><code>vllm/mod.rs:307-376</code></a></strong> &mdash; <code>get_attestation_report()</code></p>
+
+<pre><code><span class="cmt">// Simplified &mdash; full code at the permalink above</span>
+<span class="kw">async fn</span> <span class="fn">get_attestation_report</span>(&amp;self, model, signing_algo, nonce, ...)
+    -&gt; Result&lt;serde_json::Map&lt;String, Value&gt;, AttestationError&gt;
+{
+    <span class="kw">let</span> url = <span class="fn">format!</span>(<span class="str">"{}/v1/attestation/report?{}"</span>, self.config.base_url, query);
+    <span class="kw">let</span> response = self.client.<span class="fn">get</span>(&amp;url).<span class="fn">headers</span>(headers).<span class="fn">send</span>().<span class="kw">await</span>?;
+
+    <span class="kw">if</span> !response.<span class="fn">status</span>().<span class="fn">is_success</span>() {
+        <span class="kw">return</span> Err(AttestationError::FetchError(...));
+    }
+
+    <span class="kw">let</span> attestation_report = response.<span class="fn">json</span>().<span class="kw">await</span>?;  <span class="cmt">// Parse JSON, return it</span>
+    Ok(attestation_report)
+}</code></pre>
+
+<p>This function sends an HTTP GET, parses JSON, and returns it. It does <strong>not</strong>:</p>
+<ul>
+  <li>Validate any TDX quote signature</li>
+  <li>Check <code>compose_hash</code> against expected values</li>
+  <li>Check <code>app_id</code> against a whitelist</li>
+  <li>Verify that <code>signing_public_key</code> is bound to a TDX quote</li>
+  <li>Perform any cryptographic operation whatsoever</li>
+</ul>
+
+<div class="callout callout-info">
+  <div class="callout-title">Confirmed by search</div>
+  We searched the entire <code>inference_provider_pool</code> module for <code>compose_hash</code>, <code>app_id</code>, <code>verify_quote</code>, and <code>tdx</code>. <strong>Zero matches.</strong>
+</div>
+
+<h3>3.4 Signing Keys Are Trust-on-First-Use</h3>
+
+<p><strong><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L244-L289"><code>inference_provider_pool/mod.rs:244-289</code></a></strong></p>
+
+<pre><code><span class="kw">if let</span> Some(attestation_report) = Self::<span class="fn">fetch_attestation_report_with_retry</span>(...) {
+    has_valid_attestation = <span class="kw">true</span>;
+    <span class="kw">if let</span> Some(signing_public_key) = attestation_report
+        .<span class="fn">get</span>(<span class="str">"signing_public_key"</span>)
+        .<span class="fn">and_then</span>(|v| v.<span class="fn">as_str</span>())
+    {
+        pub_key_updates.<span class="fn">push</span>((signing_public_key.<span class="fn">to_string</span>(), provider.<span class="fn">clone</span>()));
+    }
+}</code></pre>
+
+<p>The <code>signing_public_key</code> is read directly from the untrusted JSON response and stored in the <code>pubkey_to_providers</code> map. <strong>Any server can claim any public key.</strong></p>
+
+<h3>3.5 <code>has_valid_attestation</code> Is Discarded</h3>
+
+<p><strong><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L1371"><code>inference_provider_pool/mod.rs:1371</code></a></strong></p>
+
+<pre><code><span class="kw">let</span> (pub_keys, <span class="cmt">_</span>) = Self::<span class="fn">fetch_signing_public_keys_for_both_algorithms</span>(
+    &amp;serving_provider, &amp;model_name, &amp;url,
+).<span class="kw">await</span>;</code></pre>
+
+<p>The <code>_</code> means the value is intentionally ignored. A provider is added to the pool regardless of whether attestation succeeded or failed.</p>
+
+<h3>3.6 What This Means in Practice</h3>
+
+<p>The operator (or anyone with database write access) can:</p>
+
+<ol>
+  <li><strong>Route conversations to a logging server:</strong> Set <code>inference_url</code> to a server that records all requests, then forwards to a real vLLM backend. cloud-api accepts it as long as the server returns valid-looking JSON from <code>/v1/attestation/report</code>.</li>
+  <li><strong>Substitute a different model:</strong> Point <code>inference_url</code> to a server running a different model. Responses come from whatever the server returns.</li>
+  <li><strong>Compromise E2EE:</strong> Since <code>signing_public_key</code> is trust-on-first-use from unverified JSON, a MITM server can present its own key. Clients encrypting to that key encrypt to the attacker.</li>
+</ol>
+
+<div class="callout callout-gap">
+  <div class="callout-title">Minimal attacker requirements</div>
+  A malicious backend needs only to: accept POST requests at <code>/v1/chat/completions</code> (proxy to real backend) and return any valid JSON at <code>/v1/attestation/report</code> (copy a real report, change the signing key).
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">4.</span> The Design Intent</h2>
+
+<p><strong>The team treats attestation as a data-export service.</strong> cloud-api <em>provides</em> attestation data to clients via <code>/v1/attestation/report</code>. The expectation is that <em>clients</em> verify the attestation, not that cloud-api verifies its backends. This is consistent with the dstack framework's design: "Users can cryptographically verify exactly what's running."</p>
+
+<p><strong>But this model has a gap at the inner boundary.</strong> The client can verify that cloud-api runs in a TEE with a known compose hash. The client <em>cannot</em> verify which vLLM backends cloud-api routes to &mdash; that decision happens inside cloud-api based on database state. The client must trust cloud-api to route correctly, and cloud-api does not verify its backends.</p>
+
+<blockquote>
+  <a href="https://github.com/nearai/cloud-api/issues/224">Issue #224</a> (2025-12-03, still open): "cloud-api should verify the attestation quotes from the models and only add the verified model nodes into the list. The verification can be done with the help of Verification SDK in Rust that we're going to release in next few weeks."
+</blockquote>
+
+<p>Four months later, Issue #224 remains open. The verification SDK has not been released.</p>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">5.</span> PR Timeline</h2>
+
+<div class="timeline">
+  <div class="timeline-entry">
+    <div class="timeline-date">2025-10-14</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/39">PR #39</a>: Fix API endpoint security vulnerability</div>
+    <div class="timeline-detail">Early security awareness</div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2025-10-21</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/issues/46">Issue #46</a>: "As a client, how to perform attestation"</div>
+    <div class="timeline-detail">Empty body &mdash; no client verification docs written</div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2025-11-03</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/issues/130">Issue #130</a>: TDX report data doesn't match expected value</div>
+    <div class="timeline-detail">Attestation correctness bugs</div>
+  </div>
+  <div class="timeline-entry highlight">
+    <div class="timeline-date">2025-12-03</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/issues/224">Issue #224</a>: "cloud-api should only add verified model nodes"</div>
+    <div class="timeline-detail"><strong>Team acknowledges the verification gap</strong></div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2025-12-04</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/issues/203">Issue #203</a>: Signing address mismatch</div>
+    <div class="timeline-detail">Signature verification impossible for clients</div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2025-12-24</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/298">PR #298</a>: E2EE introduced</div>
+    <div class="timeline-detail">signing_public_key = TOFU from unverified JSON</div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2025-12-30</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/issues/307">Issue #307</a>: Need real provider tests</div>
+    <div class="timeline-detail">Mocks can't catch attestation mismatches</div>
+  </div>
+  <div class="timeline-entry audit">
+    <div class="timeline-date">2026-01-09</div>
+    <div class="timeline-title">Our initial audit</div>
+    <div class="timeline-detail">MODEL_DISCOVERY_SERVER_URL runtime-configurable; has_valid_attestation unchecked</div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2026-01-12</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/issues/309">Issue #309</a>: Multiple instances have different signing keys</div>
+    <div class="timeline-detail">Consistency problem compounds verification gap</div>
+  </div>
+  <div class="timeline-entry good">
+    <div class="timeline-date">2026-02-20</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/415">PR #415</a>: Reproducible builds workflow</div>
+    <div class="timeline-detail">Build verification (not runtime verification)</div>
+  </div>
+  <div class="timeline-entry good">
+    <div class="timeline-date">2026-03-02</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/458">PR #458</a>: Gate DEV mode attestation bypass</div>
+    <div class="timeline-detail"><strong>Previously, <code>DEV=true</code> disabled attestation in production</strong></div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2026-03-12</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/484">PR #484</a>/<a href="https://github.com/nearai/cloud-api/pull/486">#486</a>: TLS fingerprint in attestation</div>
+    <div class="timeline-detail">More data for clients to verify; no server-side verification</div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2026-03-13</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/485">PR #485</a>: Add inference_url column</div>
+    <div class="timeline-detail">Groundwork for discovery server removal</div>
+  </div>
+  <div class="timeline-entry highlight">
+    <div class="timeline-date">2026-03-19</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/501">PR #501</a>: Redact user data from error responses</div>
+    <div class="timeline-detail"><strong>Closed without merging</strong> &mdash; backend errors still leak conversations</div>
+  </div>
+  <div class="timeline-entry">
+    <div class="timeline-date">2026-03-26</div>
+    <div class="timeline-title"><a href="https://github.com/nearai/cloud-api/pull/513">PR #513</a>: Remove discovery server</div>
+    <div class="timeline-detail">~1000 lines removed; inference_url from DB; <strong>attestation verification not added</strong></div>
+  </div>
+  <div class="timeline-entry audit">
+    <div class="timeline-date">2026-04-02</div>
+    <div class="timeline-title"><code>prod-20260402-003658</code> deployed</div>
+    <div class="timeline-detail">Current production; gap persists</div>
+  </div>
+  <div class="timeline-entry highlight">
+    <div class="timeline-date">2026-04-03</div>
+    <div class="timeline-title">Issue #224 still open</div>
+    <div class="timeline-detail">4 months since team acknowledged the gap</div>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">6.</span> Old vs New Comparison</h2>
+
+<p><a href="https://github.com/nearai/cloud-api/pull/513">PR #513</a> changed how backends are discovered, but not how they are trusted:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Aspect</th>
+      <th>Jan 2026 (pre-PR#513)</th>
+      <th>Apr 2026 (post-PR#513)</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Backend discovery</td>
+      <td><code>MODEL_DISCOVERY_SERVER_URL</code> env var</td>
+      <td><code>inference_url</code> from database</td>
+      <td class="status-improved">Improved</td>
+    </tr>
+    <tr>
+      <td>Who controls routing</td>
+      <td>Anyone who sets env var</td>
+      <td>Database admin</td>
+      <td class="status-improved">Improved</td>
+    </tr>
+    <tr>
+      <td>TDX quote validation</td>
+      <td>None</td>
+      <td>None</td>
+      <td class="status-same">Unchanged</td>
+    </tr>
+    <tr>
+      <td>compose_hash / app_id check</td>
+      <td>None</td>
+      <td>None</td>
+      <td class="status-same">Unchanged</td>
+    </tr>
+    <tr>
+      <td>Signing key trust model</td>
+      <td>TOFU from unverified JSON</td>
+      <td>TOFU from unverified JSON</td>
+      <td class="status-same">Unchanged</td>
+    </tr>
+    <tr>
+      <td><code>has_valid_attestation</code></td>
+      <td>Computed and checked</td>
+      <td>Computed and <strong>discarded</strong> (<code>_</code>)</td>
+      <td class="status-worse">Worse</td>
+    </tr>
+    <tr>
+      <td>DEV mode bypass</td>
+      <td><code>DEV=true</code> disables attestation in prod</td>
+      <td>Compile-time only (PR #458)</td>
+      <td class="status-fixed">Fixed</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">7.</span> Verification Commands</h2>
+
+<p>All claims in this document can be independently verified:</p>
+
+<pre><code><span class="cmt"># 1. Current production compose hash</span>
+curl -s https://private.near.ai/v1/attestation/report | \
+  python3 -c <span class="str">"import sys,json; print(json.load(sys.stdin)['cloud_api_gateway_attestation']['info']['compose_hash'])"</span>
+<span class="cmt"># Expected: 11369675e793061bbe1c4176cec902df45cea455922f86ee234d8332e32cdf93</span>
+
+<span class="cmt"># 2. MODEL_DISCOVERY_SERVER_URL still in allowed_envs</span>
+curl -s https://private.near.ai/v1/attestation/report | \
+  python3 -c <span class="str">"
+import sys,json
+d=json.load(sys.stdin)
+ac=json.loads(d['cloud_api_gateway_attestation']['info']['tcb_info']['app_compose'])
+print('MODEL_DISCOVERY_SERVER_URL' in ac['allowed_envs'])
+"</span>
+<span class="cmt"># Expected: True</span>
+
+<span class="cmt"># 3. Confirm Issue #224 is still open</span>
+gh api repos/nearai/cloud-api/issues/224 --jq <span class="str">'{state, title}'</span>
+<span class="cmt"># Expected: {"state":"open","title":"Enhancement: cloud-api should only add verified model nodes"}</span>
+
+<span class="cmt"># 4. Confirm zero attestation verification in source</span>
+gh api <span class="str">"repos/nearai/cloud-api/contents/crates/services/src/inference_provider_pool/mod.rs?ref=2cb48d2c54da"</span> \
+  --jq <span class="str">'.content'</span> | base64 -d | grep -c <span class="str">"compose_hash\|app_id.*check\|verify_quote\|tdx"</span>
+<span class="cmt"># Expected: 0</span>
+
+<span class="cmt"># 5. Confirm _has_valid_attestation is discarded</span>
+gh api <span class="str">"repos/nearai/cloud-api/contents/crates/services/src/inference_provider_pool/mod.rs?ref=2cb48d2c54da"</span> \
+  --jq <span class="str">'.content'</span> | base64 -d | grep <span class="str">"_has_valid_attestation\|pub_keys, _)"</span>
+<span class="cmt"># Expected: matches showing underscore-prefixed variable</span></code></pre>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="section-num">8.</span> Source References</h2>
+
+<p>All links pinned to commit <code>2cb48d2c54da</code> (<code>prod-20260402-003658</code>):</p>
+
+<table class="ref-table">
+  <thead>
+    <tr><th>What</th><th>Link</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Attestation fetch (zero verification)</td>
+      <td><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/inference_providers/src/vllm/mod.rs#L307-L376"><code>vllm/mod.rs:307-376</code></a></td>
+    </tr>
+    <tr>
+      <td>Signing key TOFU extraction</td>
+      <td><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L244-L289"><code>inference_provider_pool/mod.rs:244-289</code></a></td>
+    </tr>
+    <tr>
+      <td><code>_has_valid_attestation</code> discarded</td>
+      <td><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L1371"><code>inference_provider_pool/mod.rs:1371</code></a></td>
+    </tr>
+    <tr>
+      <td>Provider loading from DB</td>
+      <td><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L1328-L1450"><code>inference_provider_pool/mod.rs:1328-1450</code></a></td>
+    </tr>
+    <tr>
+      <td>Provider selection / routing</td>
+      <td><a href="https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L572-L776"><code>inference_provider_pool/mod.rs:572-776</code></a></td>
+    </tr>
+    <tr>
+      <td>Team acknowledgment</td>
+      <td><a href="https://github.com/nearai/cloud-api/issues/224">Issue #224</a></td>
+    </tr>
+    <tr>
+      <td>DEV bypass fix</td>
+      <td><a href="https://github.com/nearai/cloud-api/pull/458">PR #458</a></td>
+    </tr>
+    <tr>
+      <td>Discovery server removal</td>
+      <td><a href="https://github.com/nearai/cloud-api/pull/513">PR #513</a></td>
+    </tr>
+    <tr>
+      <td>Client attestation docs (empty)</td>
+      <td><a href="https://github.com/nearai/cloud-api/issues/46">Issue #46</a></td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<div class="report-footer">
+  DevProof Audits Guide &mdash; NEAR Private Chat Case Study<br>
+  Generated 2026-04-03
+</div>
+
+</div>
+</body>
+</html>

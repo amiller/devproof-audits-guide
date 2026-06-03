@@ -1,0 +1,4 @@
+# Cloned upstream source — not vendored. Re-fetch:
+#   git clone --depth 1 https://github.com/manifold-inc/targon.git refs/targon
+# targon-hub-api (Manifold-Archive/targon-hub-api) is DELETED upstream as of 2026-05-25.
+refs/

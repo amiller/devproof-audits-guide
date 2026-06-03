@@ -43,11 +43,15 @@ See [framework/STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) for detaile
 |---------|-------|-----------|
 | [hermes](case-studies/hermes/) | 0 | Pha KMS (no public upgrade log), mutable image tags |
 | [near-private-chat](case-studies/near-private-chat/) | 0 | Backend routing unverified, 56 compose hashes authorized |
+| [near-ai-private-inference](case-studies/near-ai-private-inference/) | 0 | Inner compose not in RTMR3, model weights unverified, operator log access |
 | [primus](case-studies/primus/) | 0 | Closed-source core (`libpado.so`), binary blobs |
 | [talos](case-studies/talos/) | ~1 | Reproducible builds, but enclave ID verification gap |
 | [tee-totalled](case-studies/tee-totalled/) | 0 | `LLM_BASE_URL` operator-configurable (exfiltration) |
 | [tokscope-xordi](case-studies/tokscope-xordi/) | 0 | v1.1.2: images public, repro builds improved; still `${VAR}` image refs, Pha KMS |
 | [confer.to](case-studies/confer/) | 0 | Analysis in progress |
+| [venice-private-inference](case-studies/venice-private-inference/) | 0 | ECIES wire protocol works; `veniceai/skills` misnames it "HPKE/Noise", omits every TDX-verification step |
+| [phala-private-ai-verifier](case-studies/phala-private-ai-verifier/) | 0 | Attestation-only SDK; no E2EE code, `signing_public_key` never read, "verified" is not confidentiality |
+| [tinfoil-confidential-inference](case-studies/tinfoil-confidential-inference/) | ~1 | Closes the Phala/NEAR compose-hash gap (config sha256 in launch-measured cmdline). Model weights are dm-verity-anchored with HF commit pinned in the attested config — runtime tampering produces EIO, no HF-by-name fetch like NEAR AI. Per-model enclaves fully attested; router has 2 externally-sourced slots (`DOMAIN`, `USAGE_REPORTER_SECRET`) — code-trace-shown to be off the prompt path |
 | [xordi-toy-example](case-studies/xordi-toy-example/) | **1** | Reference implementation with Base KMS |
 
 ## Common Failures

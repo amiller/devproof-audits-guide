@@ -78,6 +78,12 @@ cast call $APP_CONTRACT "getTimelock()" --rpc-url $BASE_RPC
 cast logs --from-block 0 --address $APP_CONTRACT "ComposeHashAdded(bytes32)" --rpc-url $BASE_RPC
 ```
 
+**When this requirement applies:** the "withdraw before changes take effect" sub-item is the load-bearing one — and it only matters when the service holds **persistent data encrypted under keys the operator could later access via a governance upgrade**. The threat model is: user encrypts data today under key K held inside a TEE; operator later upgrades the TEE code to one that exfiltrates K; user's past data is now compromised. Withdraw lets the user move data out before the upgrade lands.
+
+For services with **no persistent encrypted data** (ephemeral inference, where each session's plaintext exists only in-memory inside the TEE and is gone when the session ends), the withdraw requirement is vacuous. There is no past data hostage to a future upgrade. A verifying client that pins the current attested code will reject any future code change it hasn't re-audited; the user simply stops sending new requests if they don't trust the new release. The "upgrade history publicly queryable" sub-item still matters (auditors need to see release events), but the "withdraw" sub-item is satisfied trivially.
+
+This is why some Stage 1 verdicts (e.g. tinfoil-confidential-inference, near-ai-private-inference under closed-chain hermes-class clients) treat §5 as passing despite single-key upgrade authority: the threat that timelock protects against doesn't exist for ephemeral inference.
+
 ### 6. No Centralized Infrastructure Dependency
 - [ ] No Vercel/Cloudflare for serving (or served from TEE)
 - [ ] No centralized database outside TEE
