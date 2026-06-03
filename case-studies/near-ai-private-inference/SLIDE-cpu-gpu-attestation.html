@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slide — Private Inference = CPU + GPU attestation</title>
+<style>
+  :root{
+    --ink:#1f2733; --muted:#6b7682; --line:#c9d2dc; --accent:#3b5bdb;
+    --key:#6741d9; --nonce:#e8590c; --good:#2b8a3e; --warn:#b4690e; --bad:#d83a3a;
+    --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,monospace;
+    --boxbg:#f2f5f9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#e9edf2;color:var(--ink);
+    font:16px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    display:flex;justify-content:center;padding:24px}
+  .slide{width:1000px;aspect-ratio:16/9;background:#fff;border:1px solid var(--line);
+    border-radius:8px;box-shadow:0 6px 30px rgba(20,30,50,.12);padding:30px 38px;position:relative}
+  h1{font-size:28px;font-weight:700;margin:0 0 6px;letter-spacing:-.01em}
+  h1 .cpu{color:var(--accent)} h1 .gpu{color:var(--good)}
+  .stage{position:relative;margin-top:8px}
+  /* service band */
+  .services{display:grid;grid-template-columns:1.1fr 1.3fr 1.3fr;align-items:end;gap:0;height:96px}
+  .svc{text-align:center;font-size:13px;color:var(--muted)}
+  .svc b{color:var(--ink);font-weight:600;font-size:13.5px}
+  .svc .up{font-family:var(--mono);font-size:18px;color:var(--muted);line-height:1}
+  .warnflag{color:var(--bad);font-weight:700}
+  /* main row */
+  .row{display:grid;grid-template-columns:1.1fr 1.3fr 1.3fr;align-items:center;gap:0;margin-top:6px}
+  .box{background:var(--boxbg);border:1.5px solid #aab6c4;border-radius:8px;padding:16px 10px;text-align:center}
+  .box.cpu{border-color:var(--accent)} .box.gpu{border-color:var(--good)}
+  .box .t{font-weight:700;font-size:16px} .box .s{font-size:11.5px;color:var(--muted);margin-top:3px}
+  .client{text-align:center;font-weight:700;font-size:17px}
+  /* connectors */
+  .conn{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:3px;padding:0 6px}
+  .lab{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--ink);text-align:center;line-height:1.25}
+  .lab.sub{color:var(--muted);font-weight:600}
+  .ar{font-family:var(--mono);font-size:15px;color:#55626f;letter-spacing:-2px}
+  .session{border:1.5px dashed var(--good);border-radius:7px;padding:5px 6px;background:#f3faf4}
+  .nbadge{display:inline-block;background:#fdebdc;color:var(--nonce);border:1px solid #f4cba2;
+    border-radius:4px;padding:0 5px;font-family:var(--mono);font-weight:700;font-size:11px}
+  .kbadge{color:var(--key);font-weight:700}
+  /* bottom inference span */
+  .span{margin-top:16px;border-top:2px solid #55626f;position:relative;height:0}
+  .span::before{content:"◀";position:absolute;left:-2px;top:-10px;color:#55626f}
+  .span::after{content:"▶";position:absolute;right:-2px;top:-10px;color:#55626f}
+  .spanlab{text-align:center;font-size:13px;color:var(--ink);margin-top:7px;font-weight:600}
+  .spanlab .e2ee{color:var(--good);font-weight:700}
+  /* reference values */
+  .refs{position:absolute;left:38px;bottom:26px;font-size:12.5px}
+  .refs .h{font-weight:700;margin-bottom:3px}
+  .refs li{margin:1px 0;list-style:none}
+  .refs .bind{color:var(--muted)}
+  .refs code{font-family:var(--mono);font-size:11.5px}
+  .legend{position:absolute;right:38px;bottom:26px;font-size:11px;color:var(--muted);text-align:right;line-height:1.7}
+  .legend .nbadge,.legend .kbadge{font-size:11px}
+</style>
+</head>
+<body>
+<div class="slide">
+  <h1>Private Inference = <span class="cpu">CPU</span> + <span class="gpu">GPU</span> attestation</h1>
+
+  <div class="stage">
+
+    <!-- top services -->
+    <div class="services">
+      <div class="svc"><b>Client verifies via:</b><br>Intel DCAP <span class="bind" style="color:var(--muted)">(CPU quote)</span> · <b>NRAS</b> <span class="bind" style="color:var(--muted)">(GPU evidence)</span><div class="up">↑</div></div>
+      <div class="svc"><b>HuggingFace</b><br>weights by <span class="warnflag">name ⚠</span><div class="up">↑</div></div>
+      <div class="svc" style="font-size:11.5px;color:var(--muted)">GPU: emits <b>device-signed</b><br>evidence only — <i>no network</i></div>
+    </div>
+
+    <!-- main row: Client  CPU(TDX)  GPU(CC) -->
+    <div class="row">
+      <div class="client">Client<div style="font-size:11.5px;color:var(--muted);font-weight:600;margin-top:3px">mints <span class="nbadge">N</span>; verifies; encrypts</div></div>
+
+      <!-- this connector lives between client and cpu via grid? simpler: put arrows inside boxes' gap using absolute -->
+      <div class="box cpu"><div class="t">Intel TEE — CPU</div><div class="s">Intel TDX · holds <span class="kbadge">model key</span> · decrypts prompt</div></div>
+
+      <div class="box gpu"><div class="t">NVIDIA GPU</div><div class="s">CC mode · weights + kernels in protected memory</div></div>
+    </div>
+
+    <!-- arrow captions row (under boxes) -->
+    <div class="row" style="margin-top:8px">
+      <div class="conn">
+        <div class="lab"><span class="ar">─ TLS, <span class="nbadge">N</span> ▶</span></div>
+        <div class="lab sub"><span class="ar">◀ report</span></div>
+        <div class="lab sub">TDX quote (compose · <span class="kbadge">pubkey</span> · <span class="nbadge">N</span>)<br>+ GPU evidence(<span class="nbadge">N</span>)</div>
+      </div>
+      <div class="conn">
+        <div class="session">
+          <div class="lab">⇄ CC / SPDM session</div>
+          <div class="lab sub">configure · CPU <b>collects</b> GPU evidence(<span class="nbadge">N</span>)</div>
+          <div class="lab sub" style="color:var(--muted)">← bound by pinned code</div>
+        </div>
+      </div>
+      <div class="conn"></div>
+    </div>
+
+    <!-- bottom inference span -->
+    <div class="span"></div>
+    <div class="spanlab">Inference query / response — <span class="e2ee">E2EE</span>, decrypts inside the CPU TD</div>
+  </div>
+
+  <!-- reference values -->
+  <div class="refs">
+    <div class="h">Reference values <span style="font-weight:400;color:var(--muted)">(pinned / audited ahead of time)</span></div>
+    <ul style="margin:0;padding:0">
+      <li>“compose hash” <span class="bind">→ checked vs CPU TDX <code>mr_config</code></span></li>
+      <li>model weights <span class="bind">→ hash, or just <span class="warnflag">name ⚠</span> (HF)</span></li>
+      <li>GPU firmware RIM <span class="bind">→ driver+VBIOS golden vals (at NRAS)</span></li>
+    </ul>
+    <div style="margin-top:5px;font-size:11.5px;color:var(--muted)"><span class="kbadge">public key</span> is <b>not</b> a reference value — it's the <i>output</i>: trusted because the protocol bound it to the quote ‖ <span class="nbadge">N</span>.</div>
+  </div>
+
+  <div class="legend">
+    GPU evidence is <b>collected by the CPU TD</b>, carried in the report,<br>
+    and POSTed to NRAS <b>by the Client</b> — the GPU never talks to NRAS.<br>
+    <span class="nbadge">N</span> = client nonce (freshness) · <span class="kbadge">key</span> = E2E key in CPU TD · <span class="warnflag">⚠</span> = trusted, not attested
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEAR AI — Attestation Architecture &amp; Trust Chain</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --panel:#ffffff; --panel2:#eef2f7; --ink:#1c2532; --muted:#5d6b7d;
+    --line:#e4e9f0; --accent:#3b5bdb; --good:#2b8a3e; --warn:#a1690a; --bad:#d83a3a;
+    --key:#6741d9; --nonce:#e8590c; --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,monospace;
+    --shadow:0 1px 2px rgba(20,30,50,.04),0 2px 8px rgba(20,30,50,.05);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
+    font:15px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1040px;margin:0 auto;padding:32px 22px 80px}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:-.01em} h2{font-size:21px;margin:42px 0 10px;
+    padding-bottom:6px;border-bottom:2px solid var(--line)}
+  h3{font-size:16px;margin:24px 0 6px;color:var(--accent)}
+  p{margin:10px 0} .sub{color:var(--muted);margin:0 0 8px}
+  code,.mono{font-family:var(--mono);font-size:.86em}
+  code{background:var(--panel2);padding:.5px 5px;border-radius:5px;color:#2d3b4f}
+  .hex{font-family:var(--mono);font-size:.8em;word-break:break-all;color:var(--muted)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0;box-shadow:var(--shadow)}
+  .panel code{background:#f1f4f8}
+  .key{color:var(--key);font-weight:600} .nonce{color:var(--nonce);font-weight:600}
+  .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--panel);
+    border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  thead th,tr:first-child th{background:var(--panel2)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  td.mono,th.mono{font-family:var(--mono)}
+  .tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:20px;border:1px solid var(--line);color:var(--muted)}
+  .tag.good{color:#1b7a32;border-color:#bce5c6;background:#ecf9f0}
+  .tag.warn{color:#8a5a08;border-color:#f0debb;background:#fdf5e6}
+  .tag.bad{color:#c0392b;border-color:#f3c6c2;background:#fdeeec}
+  /* two-channel diagram */
+  .diagram{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;margin:18px 0;align-items:stretch}
+  .node{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center;position:relative;box-shadow:var(--shadow)}
+  .node h4{margin:0 0 6px;font-size:14px;color:var(--accent)} .node .desc{font-size:12px;color:var(--muted)}
+  .arrowcol{display:flex;flex-direction:column;justify-content:center;gap:10px;padding:0 6px;font-size:11px;color:var(--muted)}
+  .flow{font-family:var(--mono);font-size:11.5px;font-weight:600}
+  .flow .out{color:var(--good)} .flow .tls{color:var(--accent)}
+  /* architecture: CVM internal split (CPU TD ⇄ GPU) */
+  .blabel{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px}
+  .cvm{border:2px dashed var(--accent);border-radius:14px;padding:10px 10px 12px;background:#fafbff;box-shadow:var(--shadow)}
+  .cvm>.lbl{font-size:10.5px;font-weight:700;color:var(--accent);letter-spacing:.04em;text-transform:uppercase;margin:0 0 9px;text-align:center}
+  .cvm-inner{display:flex;align-items:stretch;gap:0}
+  .subnode{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 12px;text-align:center;box-shadow:var(--shadow)}
+  .subnode h5{margin:0 0 4px;font-size:13px;color:var(--ink)}
+  .subnode .desc{font-size:11px;color:var(--muted)}
+  .spdm{flex:0 0 116px;display:flex;flex-direction:column;justify-content:center;text-align:center;
+    font-family:var(--mono);font-size:9.5px;color:var(--good);font-weight:700;line-height:1.35;padding:0 6px}
+  .spdm .ln{font-size:18px;letter-spacing:-1px;margin-bottom:2px}
+  .nbadge{display:inline-block;background:#fdebdc;color:var(--nonce);border:1px solid #f4cba2;border-radius:5px;padding:0 6px;font-family:var(--mono);font-weight:700;font-size:11.5px}
+  .attrow{display:flex;align-items:center;gap:10px;margin:9px 0;flex-wrap:wrap}
+  .attrow .src{font-family:var(--mono);font-size:11.5px;font-weight:700;min-width:84px}
+  .attrow .wire{flex:1;font-family:var(--mono);font-size:11px;color:#46505e;border-bottom:2px dotted #cbd3dd;text-align:center;padding-bottom:3px;min-width:200px}
+  .attrow .dst{font-weight:700;font-size:12.5px;color:var(--accent);white-space:nowrap;min-width:96px;text-align:right}
+  /* report_data bar */
+  .rd{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:8px 0;font-family:var(--mono);font-size:12px}
+  .rd div{padding:10px 8px;text-align:center;font-weight:600}
+  .rd .a{flex:1;background:#efeaff;border-right:1px solid var(--line);color:var(--key)}
+  .rd .b{flex:1;background:#fdebdc;color:var(--nonce)}
+  .steps{counter-reset:s;padding:0;margin:14px 0;list-style:none}
+  .steps>li{counter-increment:s;position:relative;padding:12px 0 12px 44px;border-bottom:1px solid var(--line)}
+  .steps>li:last-child{border-bottom:0}
+  .steps>li::before{content:counter(s);position:absolute;left:0;top:10px;width:28px;height:28px;border-radius:50%;
+    background:var(--accent);color:#fff;font-weight:700;text-align:center;line-height:28px}
+  .steps b{color:var(--ink)}
+  .callout{border-left:4px solid var(--warn);background:#fbf6ea;padding:10px 16px;margin:14px 0;border-radius:0 10px 10px 0}
+  .callout.bad{border-color:var(--bad);background:#fcefed}
+  .callout.ok{border-color:var(--good);background:#eef9f1}
+  .legend{font-size:12px;color:var(--muted);margin:6px 0 0}
+  .small{font-size:12.5px;color:var(--muted)}
+  hr{border:0;border-top:1px solid var(--line);margin:30px 0}
+  @media(max-width:760px){.diagram{grid-template-columns:1fr}.arrowcol{flex-direction:row;justify-content:center;padding:8px 0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>NEAR AI — Attestation Architecture &amp; Trust Chain</h1>
+<p class="sub">How a verifying client connects hardware reference values to the public key it encrypts its prompt to. Values are from a live capture (<code>openai/gpt-oss-120b</code>, 2026-05-05).</p>
+
+<!-- ============================================================ -->
+<h2>1 · The one idea: two channels, one binding</h2>
+<p>The prompt is encrypted to the <span class="key">model enclave's key</span> — <b>not</b> to the TLS endpoint. TLS is transport; the privacy boundary is the model CVM's public key. The gateway only forwards ciphertext it cannot read.</p>
+
+<div class="panel">
+  <p class="blabel">Data path — where the prompt goes (and the two separate trust domains it ends in)</p>
+  <div class="diagram" style="grid-template-columns:1.05fr .55fr 1fr .42fr 2.7fr">
+    <div class="node"><h4>Client</h4><div class="desc">encrypts prompt to the <span class="key">model key</span></div></div>
+    <div class="arrowcol">
+      <div class="flow"><span class="tls">─ TLS ─▶</span></div>
+      <div class="flow"><span class="out">═ E2EE ═▶</span></div>
+    </div>
+    <div class="node"><h4>Gateway TD</h4><div class="desc">TLS terminator; sees only ciphertext</div></div>
+    <div class="arrowcol"><div class="flow"><span class="out">═▶</span></div><div class="legend">ciphertext</div></div>
+    <div class="cvm">
+      <div class="lbl">Model CVM — one VM, two hardware trust domains</div>
+      <div class="cvm-inner">
+        <div class="subnode"><h5>CPU TD · Intel TDX</h5><div class="desc">holds the <span class="key">model key</span>; <b>decrypts</b> the prompt; drives inference</div></div>
+        <div class="spdm"><div class="ln">⇄</div>CC / SPDM session<br>AES-GCM-256<br><span style="color:var(--muted)">GPU bound to<br>this TD only</span></div>
+        <div class="subnode"><h5>8× H100 · NVIDIA CC</h5><div class="desc">weights + CUDA kernels run in <b>protected memory</b> (CPR)</div></div>
+      </div>
+    </div>
+  </div>
+  <p class="small" style="margin-bottom:0">The CPU TD and the GPUs are <b>separate hardware with separate attestations</b>. The decrypted prompt only crosses between them over the encrypted CC session, and a CC-On GPU accepts work from <b>this one TD only</b> — that link is the whole integrity question (§6).</p>
+</div>
+
+<div class="panel">
+  <p class="blabel">Attestation path — the nonce <span class="nonce">N</span> is baked into <i>both</i> attestations, not just held by the client</p>
+  <p class="small" style="margin-top:0">The client mints one fresh <span class="nbadge">N</span> and sends it with the report request. Each trust domain stamps <span class="nbadge">N</span> into its own hardware attestation:</p>
+  <div class="attrow">
+    <div class="src">CPU TD →</div>
+    <div class="wire">TDX quote · report_data = [ <span class="key">signing&nbsp;addr</span> │ <span class="nonce">N</span> ]</div>
+    <div class="dst">▶ Intel DCAP</div>
+  </div>
+  <div class="attrow">
+    <div class="src">8× H100 →</div>
+    <div class="wire">GPU evidence · eat_nonce = <span class="nonce">N</span> &nbsp;(device-key signed)</div>
+    <div class="dst">▶ NVIDIA NRAS</div>
+  </div>
+  <p class="small" style="margin-bottom:0">Both return to the client in one report; the client confirms <span class="nonce">N</span> appears in <b>both</b>. So <span class="nonce">N</span> lives in three places — client, TDX quote, GPU evidence — and is the thread joining the two domains. <b>What it does not do:</b> tie the GPU's session to <i>this</i> TD (§6).</p>
+</div>
+
+<p class="small"><b>Outer channel</b> (attested TLS) proves <i>which gateway</i> you reached. <b>Inner channel</b> (E2EE) is what keeps the prompt private — a fully malicious gateway with no TEE still cannot read prompts.</p>
+
+<!-- ============================================================ -->
+<h2>2 · Actors, keys, and external verifiers</h2>
+<table>
+<tr><th>Component</th><th>Holds</th><th>Role in the proof</th></tr>
+<tr><td><b>Client</b> (hermes / nearai-cloud-verifier)</td><td>nonce <span class="nonce">N</span></td><td>generates the challenge, runs every check, then encrypts</td></tr>
+<tr><td><b>Gateway TD</b></td><td>gateway signing key</td><td>attested TLS endpoint; <i>not</i> load-bearing for confidentiality</td></tr>
+<tr><td><b>Model CVM (TD) + H100s</b></td><td><span class="key">model signing key</span> (E2E recipient)</td><td>the key the client encrypts to; private half lives only inside the TD</td></tr>
+<tr><td><b>Intel DCAP</b> (<code>dcap-qvl</code>)</td><td>Intel collateral</td><td>verifies the TDX quote (can run offline)</td></tr>
+<tr><td><b>NVIDIA NRAS</b></td><td>signed RIM golden values</td><td>verifies GPU firmware; returns <code>overall-att-result</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3 · The nonce-pairing system</h2>
+<p>The client mints one fresh <span class="nonce">N</span> (32 random bytes). The enclave produces <b>two</b> attestations, both keyed to that same <span class="nonce">N</span>:</p>
+
+<div class="panel">
+<h3 style="margin-top:0">TDX quote — <code>report_data</code> (64 bytes)</h3>
+<p class="small" style="margin-top:0">Model CVM quote:</p>
+<div class="rd">
+  <div class="a">[0:32] &nbsp; signing_address (20B) ‖ 00…00</div>
+  <div class="b">[32:64] &nbsp; nonce N</div>
+</div>
+<p class="small">Gateway quote (TLS-fingerprint mode):</p>
+<div class="rd">
+  <div class="a">[0:32] &nbsp; SHA256( signing_address ‖ tls_cert_fingerprint )</div>
+  <div class="b">[32:64] &nbsp; nonce N</div>
+</div>
+<p class="small" style="margin-bottom:0"><b>Code identity:</b> <code class="mono">mr_config = 01 ‖ SHA256(app_compose)</code> — the running docker-compose is committed in the quote.</p>
+</div>
+
+<div class="panel">
+<h3 style="margin-top:0">GPU evidence — NVIDIA</h3>
+<p style="margin-top:0">Collected with <code>cc_admin.collect_gpu_evidence_remote(N)</code>. <span class="nonce">N</span> goes into the SPDM measurement request and the <b>GPU device key signs</b> the report over it. NRAS echoes it back as <code>eat_nonce</code>. The GPU evidence commits to <span class="nonce">N</span> <b>only</b> — the signing key is <i>not</i> in it.</p>
+</div>
+
+<p><b>The two threads to draw:</b></p>
+<ul>
+  <li><span class="nonce">N</span> is the <b>horizontal thread</b> joining the TDX box and the NRAS box (<code>report_data[32:64]</code> == <code>eat_nonce</code> == N).</li>
+  <li><code>report_data[0:32]</code> is the <b>vertical thread</b> pinning the TDX box down to the <span class="key">E2E key</span> the client encrypts to.</li>
+  <li>The GPU box connects only on the <span class="nonce">N</span> thread — draw it <b>dashed</b> (see §6).</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>4 · Trust chain — connecting reference values to the key</h2>
+<p>This is the <b>verify-then-encrypt</b> sequence. Each step rejects on failure; only after all pass does the client encrypt.</p>
+
+<ol class="steps">
+  <li><b>Request.</b> <code>GET /v1/attestation/report?model=M&amp;nonce=<span class="nonce">N</span>&amp;signing_algo=ecdsa&amp;include_tls_fingerprint=true</code></li>
+  <li><b>Verify the model TDX quote</b> with <code>dcap-qvl</code> → genuine Intel TD, TCB acceptable. Extract <code>report_data</code> and <code>mr_config</code>.</li>
+  <li><b>Freshness:</b> <code>report_data[32:64] == <span class="nonce">N</span></code> → this quote answers <i>this</i> challenge (not a replay).</li>
+  <li><b>Key binding:</b> <code>report_data[0:32] == signing_address</code> → the freshly-attested TD vouches for this exact address.</li>
+  <li><b>Key derivation:</b> <code>keccak256(signing_public_key[1:])[-20:] == signing_address</code> → the public key on offer is the one the hardware bound (ECDSA path; for Ed25519 the address <i>is</i> the key).</li>
+  <li><b>Code identity:</b> <code>mr_config == 01 ‖ SHA256(app_compose)</code>, and <code>app_compose</code> is in the pinned allow-set (on-chain anchors / <code>compose_hashes</code>) → the right image is running, not just <i>a</i> TD.</li>
+  <li><b>GPU:</b> POST the GPU evidence to NRAS → <code>overall-att-result == True</code> <i>and</i> <code>eat_nonce == <span class="nonce">N</span></code> → genuine, fresh H100s in the same round.</li>
+  <li><b class="good">Encrypt.</b> Only now: encrypt the prompt to <code class="key">signing_public_key</code>. The private half derives only inside the model TD, so only that enclave can decrypt. <span class="small">ECIES (secp256k1) or X25519+ChaCha20-Poly1305 (Ed25519).</span></li>
+</ol>
+
+<p class="small">Steps 3–5 are the load-bearing join: <b>fresh quote → this address → this public key</b>. Step 6 says the quote came from the audited code; step 7 says a real GPU is present in the same round. The key the client trusts in step 8 is therefore tied, by reference values, all the way back to genuine hardware running known code.</p>
+
+<!-- ============================================================ -->
+<h2>5 · Reference values (live capture)</h2>
+<p class="sub"><code>openai/gpt-oss-120b</code> · 2026-05-05 · 8× H100</p>
+
+<h3>Nonce pairing</h3>
+<table>
+<tr><th>Field</th><th>Value</th></tr>
+<tr><td class="mono">nonce N</td><td class="hex">5e4149d822f14ac5dfdb158eb73504e0379af27b9584be909cf49115e121370d</td></tr>
+<tr><td class="mono">NRAS eat_nonce</td><td class="hex">5e4149…370d &nbsp;<span class="tag good">== N</span></td></tr>
+<tr><td class="mono">gateway signing_address</td><td class="hex">0x614bc66ff0407dbb70b9c7ca1f5e983e4a02c921</td></tr>
+<tr><td class="mono">gateway tls_cert_fingerprint</td><td class="hex">9133446030e5dd73e3f3c151315bf431508991ebc108f37fc01b36836af0…</td></tr>
+<tr><td class="mono">mr_config (model)</td><td class="hex">01 ‖ SHA256(app_compose)</td></tr>
+</table>
+
+<h3>NRAS per-GPU claims (×8, GPU-0 … GPU-7)</h3>
+<table>
+<tr><th>Claim</th><th>Value</th><th>Means</th></tr>
+<tr><td class="mono">x-nvidia-overall-att-result</td><td><span class="tag good">True</span></td><td>NVIDIA's gestalt verdict — <b>the only field our tools check</b></td></tr>
+<tr><td class="mono">hwmodel</td><td>GH100</td><td>genuine Hopper die</td></tr>
+<tr><td class="mono">ueid</td><td class="hex">398876139566415078907715884549638021631238613499</td><td>this GPU's unique id</td></tr>
+<tr><td class="mono">dbgstat</td><td>disabled</td><td>debug off — <span class="warn">CC-On, not DevTools</span> (uninspected)</td></tr>
+<tr><td class="mono">secboot</td><td>True</td><td>secure boot on</td></tr>
+<tr><td class="mono">measres</td><td>success</td><td>measurements matched the RIM</td></tr>
+<tr><td class="mono">x-nvidia-gpu-driver-version</td><td>570.172.08</td><td>matched against signed driver RIM</td></tr>
+<tr><td class="mono">x-nvidia-gpu-vbios-version</td><td>96.00.CF.00.02</td><td>matched against signed VBIOS RIM</td></tr>
+<tr><td class="mono">x-nvidia-gpu-{driver,vbios}-rim-*</td><td><span class="tag good">all True</span></td><td>RIM fetched, signature-verified, measurements-available</td></tr>
+</table>
+<p class="small">Every NRAS claim is about the GPU's own <b>firmware</b> (driver + VBIOS, against NVIDIA-signed golden RIMs) — none measure the model weights, kernels, or container code. That binding lives entirely on the TDX / <code>mr_config</code> side.</p>
+
+<!-- ============================================================ -->
+<h2>6 · What's load-bearing — and what it rests on</h2>
+
+<div class="callout">
+<b>What stops a foreign CPU from swapping weights or injecting a kernel: CC-On, not the nonce.</b> A <b>CC-On</b> H100 binds to exactly one CPU TD via an SPDM session; its firewalls block every other CPU/host from the protected memory (CPR), and all kernel launches + DMA go over an AES-GCM-256 channel keyed to that session. So a different CPU has no session keys — it <b>cannot</b> submit a kernel, read activations, or overwrite weights. That tampering is only possible if the GPU is <b>CC-Off</b> (an ordinary GPU any host can drive). Integrity therefore rests on two things: <b>(a) the GPU is CC-On</b>, and <b>(b) its session is bound to the attested TD</b>.
+</div>
+<div class="callout ok">
+<b>Both (a) and (b) are established — by pinning the code, not by a GPU claim.</b> A CC-Off GPU <b>cannot produce a valid CC attestation at all</b>, so a <b>mandatory, enforced</b> NRAS PASS rules out CC-Off by construction (this is why GPU attestation must be hard-required, not soft-failed). CC-On and the TD-binding are then carried by the <b>measured, pinned code</b>: the audited inference-proxy collects evidence from — and runs inference on — <i>its own</i> GPUs. So pinning <code>compose_hash</code> (Block B/C, which hermes does) makes the GPU↔TD binding sound <b>by construction</b> — the code that computes is the code that verified. The bare-nonce weld and the absence of a CC-mode claim don't open an attack for a pinning client; they would only matter if you ran <i>unpinned</i> code or <i>soft-failed</i> NRAS.
+</div>
+
+<div class="callout ok">
+<b>Checked and ruled out</b> (software-adversary model; physical attacks out of scope, as for the TDX die itself):
+<ul style="margin:6px 0 0;padding-left:18px">
+<li><b>CC-DevTools</b> (would re-open side channels) — <b>not engaged</b>: live attestation shows <code>dbgstat=disabled</code>, <code>secboot=True</code> → CC-On.</li>
+<li><b>Decoy GPU</b> (attest one card, compute on another) — <b>foreclosed by compose pinning</b>: collecting evidence from elsewhere requires modified code, which changes <code>compose_hash</code>.</li>
+<li><b>Multi-GPU NVLink</b> (H100 CC doesn't encrypt GPU↔GPU NVLink; NEAR runs TP=4–8 for DeepSeek / GLM / Qwen) — cross-GPU activations travel GPU-to-GPU on NVLink, or PCIe-through-CPU via encrypted bounce buffers; never host-mappable, so only a <b>physical</b> NVLink/NVSwitch tap reads them → out of scope.</li>
+</ul>
+</div>
+
+<table>
+<tr><th>Guarantee</th><th>Carried by</th><th>Status</th></tr>
+<tr><td>Prompt confidentiality</td><td>model TD (E2E key derived inside) + verify-then-encrypt</td><td><span class="tag good">sound if steps 2–7 enforced</span></td></tr>
+<tr><td>Right <b>code</b> &amp; model name</td><td><code>mr_config</code> == pinned <code>app_compose</code></td><td><span class="tag warn">needs compose pinning (Block B/C)</span></td></tr>
+<tr><td>Model <b>weights</b> are the named ones</td><td>HuggingFace fetch <b>by name</b></td><td><span class="tag warn">name pinned, bytes not (integrity)</span></td></tr>
+<tr><td>Genuine GPU present</td><td>NRAS <code>overall-att-result</code> + nonce</td><td><span class="tag good">yes (if enforced)</span></td></tr>
+<tr><td>GPU is the compute GPU, in CC-On</td><td>measured driver + pinned <code>compose_hash</code></td><td><span class="tag good">sound when compose pinned</span></td></tr>
+<tr><td>Which gateway you reached</td><td>gateway <code>report_data</code> ‖ TLS fingerprint</td><td><span class="tag good">yes (and substitutable by inner channel)</span></td></tr>
+</table>
+
+<hr>
+<p class="small">Generated for the devproof-audits-guide NEAR AI case study. Reference values from live <code>/v1/attestation/report</code> + NRAS replay. Under the software-adversary model (physical attacks out of scope), the chain is sound for a client that <b>pins <code>compose_hash</code></b> and <b>enforces NRAS</b>. The one residual is weight provenance — the model <i>name</i> is pinned, the weight <i>bytes</i> are not.</p>
+
+</div>
+</body>
+</html>
