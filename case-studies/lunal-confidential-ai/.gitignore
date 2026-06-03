@@ -1,0 +1,9 @@
+# Cloned third-party source — untracked. Re-fetch with:
+#   mkdir -p refs && cd refs
+#   git clone https://github.com/lunal-dev/attestation-rs.git       && (cd attestation-rs      && git checkout c1aebc2)
+#   git clone https://github.com/lunal-dev/kettle.git               && (cd kettle              && git checkout 6a78002)
+#   git clone https://github.com/lunal-dev/privateclaw-cli.git      && (cd privateclaw-cli     && git checkout 403408f)
+#   git clone https://github.com/lunal-dev/confidential-cvm-cli.git && (cd confidential-cvm-cli && git checkout f77595c)
+#   git clone https://github.com/lunal-dev/attestation-go.git       && (cd attestation-go      && git checkout ae2c7e4)
+#   git clone https://github.com/lunal-dev/home.git                 && (cd home                && git checkout d4f6498)
+refs/

@@ -124,6 +124,19 @@ As of April 2026 live testing, NRAS is returning a boolean `False` verdict — n
 
 Source: `src/attestation.rs:725-802`, `gpu_evidence_worker.py`
 
+**GPU attestation evasion — verifier blind-spots (see [GPU-ATTESTATION-EVASION-PLAN.md](GPU-ATTESTATION-EVASION-PLAN.md)).**
+Beyond live-status: every NEAR verifier (nearai-cloud-verifier, Phala
+private-ai-verifier, awesome-private-inference, hermes) gates the GPU verdict on
+the single `x-nvidia-overall-att-result` boolean + nonce. None inspects the
+per-GPU sub-claims. This leaves provider-controlled configs that pass all tools:
+**A1 (confirmed)** — running CC-DevTools instead of CC-On re-opens the
+side-channel/profiling surface CC-On closes; the mode is detectable via
+`dbgstat` but no tool checks it (one-line fix: assert `dbgstat=="disabled"`).
+**A3 (confirmed blind-spot)** — multi-GPU models attest 8 cards with zero
+fabric/PPCIE claim in the bundle. **A2** — the TDX↔GPU weld is the bare nonce
+(not Chutes-style `SHA256(nonce‖pubkey)`), so attested cards need not be the
+compute cards. Cross-ref Chutes F4.
+
 ---
 
 ### nearai/compose-manager

@@ -176,19 +176,55 @@ User ──TLS──▶ dstack-ingress CVM ──VPC──▶ chat-api CVMs ─�
 - MODEL_DISCOVERY_SERVER_URL (runtime config, NO reference value verification)
 - AppAuth contracts (unverified on Base)
 
-## MODEL_DISCOVERY_SERVER_URL - NO VERIFICATION
+## Attestation Verification Gap (Critical Finding)
+
+### Jan 2026 (original audit, commit 80e73e25)
 
 ```bash
-# Check that MODEL_DISCOVERY_SERVER_URL is in allowed_envs (runtime configurable)
+# MODEL_DISCOVERY_SERVER_URL in allowed_envs (operator-controlled at runtime)
 curl -s https://private.near.ai/v1/attestation/report | \
-  jq -r '.cloud_api_gateway_attestation.info.tcb_info.app_compose' | \
-  jq '.allowed_envs' | grep MODEL_DISCOVERY
-# "MODEL_DISCOVERY_SERVER_URL"
-
-# The code does NOT verify attestation against reference values!
-# See cloud-api/crates/inference_providers/src/vllm/mod.rs:144-208
-# get_attestation_report() just fetches JSON - no app_id/compose_hash/TDX verification
+  python3 -c "import sys,json; d=json.load(sys.stdin); ac=json.loads(d['cloud_api_gateway_attestation']['info']['tcb_info']['app_compose']); print('\n'.join(ac['allowed_envs']))" | grep MODEL_DISCOVERY
+# MODEL_DISCOVERY_SERVER_URL
+# MODEL_DISCOVERY_API_KEY
 ```
+
+### Apr 2026 (follow-up, prod-20260402-003658, commit 2cb48d2c54da)
+
+PR#513 removed discovery server code. Verify the new code still lacks attestation verification:
+
+```bash
+# 1. Confirm current production compose hash
+curl -s https://private.near.ai/v1/attestation/report | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['cloud_api_gateway_attestation']['info']['compose_hash'])"
+# 11369675e793061bbe1c4176cec902df45cea455922f86ee234d8332e32cdf93
+
+# 2. MODEL_DISCOVERY_SERVER_URL still in allowed_envs (vestigial)
+curl -s https://private.near.ai/v1/attestation/report | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); ac=json.loads(d['cloud_api_gateway_attestation']['info']['tcb_info']['app_compose']); print('MODEL_DISCOVERY_SERVER_URL' in ac['allowed_envs'])"
+# True
+
+# 3. Verify zero attestation verification in source (on prod tag)
+# get_attestation_report() — HTTP GET, parse JSON, return. No TDX/compose_hash/app_id check.
+# https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/inference_providers/src/vllm/mod.rs#L307-L376
+
+# _has_valid_attestation discarded (underscore prefix = unused)
+# https://github.com/nearai/cloud-api/blob/2cb48d2c54da794217ee31f730dbbf94b977c8f0/crates/services/src/inference_provider_pool/mod.rs#L1371
+
+# 4. Confirm Issue #224 still open
+gh api repos/nearai/cloud-api/issues/224 --jq '{state, title, created_at}'
+# {"state":"open","title":"Enhancement: cloud-api should only add verified model nodes","created_at":"2025-12-03T08:57:37Z"}
+```
+
+### Key GitHub References (prod-20260402)
+
+| What | Link |
+|------|------|
+| Attestation fetch (zero verification) | https://github.com/nearai/cloud-api/blob/2cb48d2c54da/crates/inference_providers/src/vllm/mod.rs#L307-L376 |
+| Signing key TOFU extraction | https://github.com/nearai/cloud-api/blob/2cb48d2c54da/crates/services/src/inference_provider_pool/mod.rs#L244-L289 |
+| `_has_valid_attestation` discarded | https://github.com/nearai/cloud-api/blob/2cb48d2c54da/crates/services/src/inference_provider_pool/mod.rs#L1371 |
+| Team acknowledgment | https://github.com/nearai/cloud-api/issues/224 |
+| DEV bypass fix | https://github.com/nearai/cloud-api/pull/458 |
+| Discovery server removal | https://github.com/nearai/cloud-api/pull/513 |
 
 ## Verify Database Stores Only Metadata
 
