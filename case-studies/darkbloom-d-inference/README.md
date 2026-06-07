@@ -24,7 +24,9 @@ Five of those six are findable from the research paper alone — see the *Concor
 
 | File | Purpose |
 |---|---|
-| `DEVPROOF-REPORT.md` | **Canonical audit report.** Quick Status, architecture diagrams, stage assessment, six findings, paper concordance, reproduction steps. Start here. |
+| `DEVPROOF-REPORT.md` | **Canonical current report (2026-06-07, HEAD `069a6c3`).** Quick Status, per-finding current state, net assessment. Start here. |
+| `DEVPROOF-REPORT-2026-05-10.md` | Historical snapshot — the original audit at HEAD `cf4c0ef`. Full architecture diagrams, stage assessment, paper concordance, as-first-written findings. |
+| `FOLLOWUP-REPORT.md` | 2026-06-07 multi-agent re-examination after vendor-claimed fixes (examiner + adversarial skeptic per finding). Detailed code citations behind the current report. |
 | `CHAIN-OF-TRUST.md` | Deep dive on cert-chain verification with the actual openssl/Python results from the live network (17/30 binding holds, 13/30 fails). |
 | `RECON.md` | Initial recon notes. Useful for understanding how we arrived at the architectural framing; superseded by the report for findings. |
 | `ISSUES-DRAFT.md` | Six file-able GitHub issues (F1–F6) with reproduce steps and code citations. Frame is devproofness/verifiability, not security. |
