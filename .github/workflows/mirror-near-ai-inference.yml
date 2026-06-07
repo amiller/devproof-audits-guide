@@ -1,0 +1,27 @@
+name: Mirror main to near-ai-inference
+
+# Keeps the legacy branch `near-ai-inference` pinned to `main` so an old shared
+# link (…/tree/near-ai-inference/…) always resolves to current content.
+# Runs server-side on every push to main; pushing to a different branch does not
+# re-trigger this workflow, so there is no loop.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-near-ai-inference
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fast-forward near-ai-inference to main
+        run: git push --force origin HEAD:refs/heads/near-ai-inference
