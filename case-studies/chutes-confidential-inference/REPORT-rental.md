@@ -156,7 +156,7 @@ Net: a renter who only distrusts the **miner** is well served. A renter (or thei
 **prove the specific workload** without trusting Chutes cannot, today — the gap is tenant-controlled signing
 + a measured workload binding.
 
-## Probe / reproduction (no payment; no image build)
+## Probe / reproduction (no image build)
 
 ```bash
 # Base image is published + hash-pinned — fetch and verify without building:

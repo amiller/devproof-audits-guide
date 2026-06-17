@@ -55,11 +55,9 @@ in no RTMR** ([PLATFORM §4](./PLATFORM.md#4-the-root-gap-that-splits-the-two-re
   On `llm.chutes.ai` users select a model without knowing or trusting who deployed it. **Demonstrated live**
   — cross-user prompt exfiltration on a `verified=True` enclave, egress-free, via the model-as-carrier
   channel. See [`OPERATOR-EXFIL-POC.md`](./OPERATOR-EXFIL-POC.md).
-- **Model identity.** Nothing binds `model_name`+`revision` to the quote; the served label is the *chute's*
-  name (`--served-model-name {self.name}`), set by the operator and decoupled from the actual weights. The
-  operator re-points the same named, `verified=True`, billed endpoint at arbitrary weights — **demonstrated
-  live for $0** (SmolLM2-1.7B + Qwen-0.5B served under an `…Euryale-70B…` name; `/v1/models` reports the
-  false name).
+- **Model identity.** Nothing binds `model_name`+`revision` to the quote — the weights are pulled at
+  container start by an operator-set variable and never measured, so a client cannot confirm which model
+  actually answered.
 
 **Severity: High — the maximal prompt-path failure.** The operator owns *all* the code that sees plaintext,
 so this negates the confidential-inference claim at the application layer for any chute offered *as* private

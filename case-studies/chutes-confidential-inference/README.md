@@ -9,7 +9,7 @@ service, measurement registry, LUKS key release).
 **application code and model run unmeasured inside the enclave**, so a verified quote proves "genuine
 TDX+GPU running *a* Chutes-blessed base image," not "*this* model on *this* code." That single fact is a
 **confidentiality + identity** gap for a consumer and a **provability** gap for a provider — and it is
-demonstrated live (a $0 model swap and cross-user prompt exfiltration on a `verified=True` enclave). The
+demonstrated live (cross-user prompt exfiltration from a `verified=True` enclave). The
 miner (host) is *not* the threat — it is contained by a measured admission controller; the residual trust
 is in Chutes' control plane and the chute operator.
 
@@ -20,12 +20,12 @@ is in Chutes' control plane and the chute operator.
 | [`PLATFORM.md`](./PLATFORM.md) | **Start here.** Shared facts both reports assume: the sound crypto core (verified live), base-image provenance (reachable via `sek8s`), miner containment (the measured admission + TEE-gated LUKS), the root unmeasured-code gap, and lower-tier items. |
 | [`REPORT-inference.md`](./REPORT-inference.md) | **Consumer surface** — you call a hosted `-TEE` model you didn't deploy. Can anyone read your prompts; is the model real? (I1 plaintext default · I2 verify-then-encrypt optional · I3 unmeasured operator code → exfil + substitution) |
 | [`REPORT-rental.md`](./REPORT-rental.md) | **Provider surface** — you deploy your own chute (cords/jobs) on a rented GPU. Does *my* code run, and can I prove it? (R1 server-side build/sign · R2 admission controller · R3 confidential-vs-miner-not-Chutes · R4 Jobs unaudited) |
-| [`OPERATOR-EXFIL-POC.md`](./OPERATOR-EXFIL-POC.md) | Dated live demonstration (2026-06-16/17, self-deployed chute on the author's own account): the $0 model swap and the egress-free cross-user prompt exfiltration that make the unmeasured-code gap concrete. |
+| [`OPERATOR-EXFIL-POC.md`](./OPERATOR-EXFIL-POC.md) | Dated live demonstration (2026-06-16/17, self-deployed chute on the author's own account): egress-free cross-user prompt exfiltration from a `verified=True` enclave, the concrete evidence for the unmeasured-code gap. |
 | [`ISSUES-DRAFT.md`](./ISSUES-DRAFT.md) | The findings as file-able GitHub issues, framed as verifiability gaps, in priority order. |
 | [`verify/verify_chutes.py`](./verify/verify_chutes.py) | ~115-line standalone reproducer. Hits the live `api.chutes.ai` and checks the five crypto-core properties **and** the model-substitution gap (check [6]: two different `-TEE` models, byte-identical quote). ~5s, needs an API key in `/tmp/ck`. This is the runnable evidence behind the reports. |
 | `refs/` | Local clones of the four source repos — **gitignored, not committed**; re-fetch commands are in `.gitignore`. |
 
-## Reproduce (no payment, ~5s)
+## Reproduce (~5s)
 
 ```bash
 # API key in /tmp/ck (Bearer cpk_...)

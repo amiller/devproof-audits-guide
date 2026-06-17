@@ -47,7 +47,7 @@ miner host (permissionless, OUTSIDE the trust boundary)
 A client who does the work can prove it is talking to a real, non-debug Intel TDX enclave whose
 ML-KEM-768 key is hardware-bound, with per-request freshness, and that the control plane and miner
 host see only ciphertext **on the E2E path**. Confirmed against the live API (`verify/verify_chutes.py`,
-no payment, ~5s):
+~5s):
 
 ```
 [1] report_data[0:32] == SHA256(nonce+pub)  : True   (E2E key hardware-bound)
@@ -189,7 +189,7 @@ model-keyed golden values; disclose the registered chute `code` (currently `code
 | `chutesai/chutes-miner` | `7afea4b1` | operator; k8s launch (`k8s/util.py`), `tee_images`, `audit_exporter.py` |
 | [`chutesai/sek8s`](https://github.com/chutesai/sek8s) | — | guest TDX VM build, OPA+cosign admission controller, measurement-recompute tooling, prebuilt qcow2 |
 
-Reproduce (no payment, ~5s):
+Reproduce (~5s):
 
 ```bash
 # API key in /tmp/ck (Bearer cpk_...)
