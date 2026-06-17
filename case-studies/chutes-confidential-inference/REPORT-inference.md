@@ -1,9 +1,13 @@
 # Chutes Consumer Inference — DevProof Report
 
-**Surface:** you call a hosted `-TEE` model on `llm.chutes.ai` that *someone else deployed*. You did
-not write the code that runs in the enclave.
-**The question:** can anyone — Chutes' control plane, the miner host, or the chute's operator — read
-your prompts, and is the model that answers actually the one named?
+This report covers **Question 1** of [`PLATFORM.md §0`](./PLATFORM.md#0-setting-the-parties-and-the-two-questions):
+
+> **End user → Chutes: "Can I verify that Chutes isn't seeing my data?"**
+
+**Setting:** you are an end user calling a hosted `-TEE` model on `llm.chutes.ai`. You did not write the
+code that runs in the enclave, and the party you are trying to remove from your trust base is **Chutes the
+platform** — which operates the control plane *and* (for the first-party catalog) authored the in-enclave
+code that decrypts your prompt. Can you confirm, without trusting Chutes, that neither sees your data?
 **Shared facts** (crypto core, base-image provenance, miner containment, lower-tier F4/F5) live in
 [`PLATFORM.md`](./PLATFORM.md) and are not restated here.
 

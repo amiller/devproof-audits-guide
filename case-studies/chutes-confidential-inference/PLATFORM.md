@@ -20,6 +20,44 @@ Two verification regimes coexist; only the second is confidential and in scope:
 
 ---
 
+## 0. Setting: the parties, and the two questions
+
+A request to a confidential Chutes model passes through four parties:
+
+- **End user** — sends a prompt; wants it to stay private.
+- **Chutes (the platform)** — Rayon Labs: operates the `api.chutes.ai` control plane, **builds and signs
+  every chute image** server-side (`forge`), runs the attestation / key-release service, and holds the
+  signing and LUKS keys. This is the party a TEE is nominally there to remove from the trust base.
+- **The chute operator** — whoever wrote the `serve.py` that runs inside the enclave and *sees the decrypted
+  prompt*. For the first-party `llm.chutes.ai` catalog this is Chutes itself; it can equally be a **Chutes
+  customer** — a third party building a private-inference product on top of Chutes and reselling it to their
+  own users.
+- **The miner** — provides the GPU hardware; permissionless, explicitly outside the trust boundary, and
+  **contained** (§3), so it is not the subject of either question below.
+
+"Confidential inference" makes two different promises to two different parties, and there is a devproof gap
+in each. **Both gaps have the same root cause** (§4): the code on the plaintext path — the model weights and
+the operator's `serve.py` — sits **outside the attested surface**, and there is **no workaround** a client or
+operator can apply.
+
+1. **End user → Chutes: "Can I verify that Chutes isn't seeing my data?"**
+   Covered by [`REPORT-inference.md`](./REPORT-inference.md). Today, no: the default API path hands the prompt
+   to the control plane in plaintext (I1); the opt-in E2E path ships no verifier so the control plane can
+   substitute its key (I2); and even a perfectly verified E2E session terminates in unmeasured code that
+   Chutes built and could change (I3). This is about **removing trust in Chutes.**
+
+2. **Chutes customer → their own customers: "Can I prove that inference runs without me — or Chutes — seeing
+   the data?"**
+   Covered by [`REPORT-rental.md`](./REPORT-rental.md). Today, no: the customer's `serve.py` is built and
+   signed by Chutes server-side and bound to no measured register, so the customer cannot point their
+   downstream users at an attestation that proves *which* code touched the plaintext (R1). This is about a
+   Chutes customer **passing a confidentiality guarantee through** to their own users.
+
+The crypto core (§1) is sound for both. The gap in both is that the *application* code — the part that
+actually sees plaintext — is unmeasured, with no self-attestation path available to close it.
+
+---
+
 ## Trust topology (TEE path)
 
 ```

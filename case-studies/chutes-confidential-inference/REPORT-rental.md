@@ -1,19 +1,25 @@
-# Chutes Provider / Container Rental — DevProof Report
+# Chutes Provider — DevProof Report
 
-**Surface:** you deploy *your own* confidential chute — a vLLM/SGLang template, custom `@chute.cord`
-handlers, or a `@chute.job` — to run on a permissionless miner's GPU (e.g. an 8×RTX PRO 6000 TEE node).
-You are the workload author.
-**The question:** does the platform run **my** code unmodified, with the GPU owner unable to see inside —
-and can I **prove** that to my own end-users?
+This report covers **Question 2** of [`PLATFORM.md §0`](./PLATFORM.md#0-setting-the-parties-and-the-two-questions):
+
+> **Chutes customer → their own customers: "Can I prove that inference runs without me — or Chutes —
+> seeing the data?"**
+
+**Setting:** you are a **Chutes customer** — you deploy your own confidential chute (a vLLM/SGLang template,
+custom `@chute.cord` handlers, or a `@chute.job`) and resell it to *your* users as private inference. You
+want to hand them a guarantee they can check: that the code touching their plaintext is the audited,
+non-exfiltrating code you wrote, and that neither you nor Chutes can quietly read their data. Secondarily,
+because the chute runs on a permissionless miner's GPU, you also want the GPU owner unable to see inside.
 **Shared facts** (crypto core, base-image provenance, miner containment, lower-tier F4/F5) live in
 [`PLATFORM.md`](./PLATFORM.md) and are not restated here.
 
-> **Why a separate report from the consumer one.** The two surfaces have near-inverted threat models. The
-> consumer asks *"is the operator serving model X, and can they read my prompts?"* The provider asks *"does
-> the platform run my image, and can I prove it without trusting Chutes?"* The load-bearing mechanism here —
-> a measured cosign admission controller — barely matters to the consumer report; model identity barely
-> matters here because the tenant *is* the workload author (so there is no victim from self-deployment — the
-> gap is provability to *downstream* users, not confidentiality from oneself).
+> **Why a separate report from the consumer one.** Same root cause (unmeasured plaintext-path code,
+> [PLATFORM §4](./PLATFORM.md#4-the-root-gap-that-splits-the-two-reports)), inverted vantage point. The
+> consumer (Question 1) wants to *remove trust in Chutes*; here you *are* the operator, so there is no
+> victim from your own deployment — the gap is that you cannot **pass a confidentiality guarantee through**
+> to your downstream users, because the code that sees their plaintext is built+signed by Chutes server-side
+> and bound to no measured register you or they can check. The load-bearing platform mechanism here — a
+> measured cosign admission controller — barely matters to the consumer report.
 
 ---
 
@@ -80,10 +86,13 @@ The build and signature are entirely control-plane-side:
    builds it, so there is no tenant-side artifact to compare against.
 
 **Impact:** the tenant — and, more importantly, the tenant's *end-users* — cannot externally distinguish "the
-tenant's audited image ran" from "a Chutes-modified image ran." **Severity: High** — it is the core rental
-claim. **Fix:** let tenants sign their own image (their key in the admission policy, or a tenant-namespaced
-keyless identity), pin the tenant image digest into RTMR3, and publish the per-deployment digest so end-users
-can match the attested register to a tenant-published value.
+tenant's audited image ran" from "a Chutes-modified image ran." In confidentiality terms (Question 2): you
+cannot prove to your users that the code which sees their plaintext is your non-exfiltrating code rather than
+a substitute — the very gap the consumer report shows is exploitable in
+[`OPERATOR-EXFIL-POC.md`](./OPERATOR-EXFIL-POC.md). **Severity: High** — it is the core guarantee a Chutes
+customer would resell. **Fix:** let tenants sign their own image (their key in the admission policy, or a
+tenant-namespaced keyless identity), pin the tenant image digest into RTMR3, and publish the per-deployment
+digest so end-users can match the attested register to a tenant-published value.
 
 ---
 
