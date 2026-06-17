@@ -5,11 +5,13 @@
 pip-installed SDK `chutes==0.6.9` (`~/.local/.../site-packages/chutes`). Line numbers below
 are from that wheel; they may differ from the audit's pinned `rayonlabs/chutes 08d79872`.
 
-This extends **F1** ("served model identity is not attested") with two things the
-source-only pass didn't have: a **live, operator-side demonstration** that the served model is
-in no measured register (so it is silently substitutable), and the observation that the *same
-root cause* — operator code running unmeasured inside the TD — is a **prompt-confidentiality**
-gap, not just a model-identity gap.
+This is the live evidence behind the lead finding of [`REPORT-inference.md`](./REPORT-inference.md) (I3)
+and the unmeasured-code root cause in [`PLATFORM.md §4`](./PLATFORM.md#4-the-root-gap-that-splits-the-two-reports).
+It was performed hands-on against a chute the author deployed on their *own* account — not against another
+tenant's workload — to demonstrate two things a source-only pass could not: a **live, operator-side
+demonstration** that the served model is in no measured register (so it is silently substitutable), and that
+the *same root cause* — operator code running unmeasured inside the TD — is a **prompt-confidentiality** gap,
+not just a model-identity gap.
 
 ---
 
@@ -19,7 +21,7 @@ gap, not just a model-identity gap.
 `@chute.on_startup()` (`chute/template/vllm.py:~335` `snapshot_download(repo_id=model_name,
 revision=...)`), and launches vLLM with `--served-model-name {self.name}` — i.e. the served
 label is the *chute's* name, set by the operator and decoupled from the actual weights. Because
-the model is in **no measured register** (F1), an operator can hold the advertised identity
+the model is in **no measured register**, an operator can hold the advertised identity
 fixed and point the weights anywhere, undetectably:
 
 ```python
@@ -35,7 +37,7 @@ Done live on `chute_id 0dd7dbaa-1ede-5707-9ec2-5b465ebc2417`:
 - The instance went **`verified=True`** (instance `45243927…`, version `fd2f0ee1`=SmolLM2) —
   TDX/GPU attestation passed for an enclave whose served model contradicts its advertised name.
 
-This is F1's "operator-trust" verdict made concrete: the operator (not a malicious miner)
+This is the unmeasured-code "operator-trust" verdict made concrete: the operator (not a malicious miner)
 re-points the **same named, attested** endpoint at arbitrary weights and nothing a client
 verifies changes. (Pricing aside, *not* a devproof point: under their fee model these redeploys
 also happen to be free — same name + same image = no fee — so the swap is costless, but that is
@@ -66,7 +68,7 @@ unmeasured `serve.py`** in the same process. On the verified-E2E path, inside th
 operator's `serve.py`** (`@chute.cord`). The operator has full Python execution in this
 process — custom cords, `@chute.on_startup` hooks, monkeypatching the passthrough, background
 tasks reading process memory. Because `serve.py` is **excluded from CFSV and in no RTMR** (the
-F1 root cause), a verifying client **cannot detect** that the running code logs, stashes, or
+unmeasured-code root cause), a verifying client **cannot detect** that the running code logs, stashes, or
 ships the plaintext out.
 
 Exfil channel is real and often open by construction: `allow_external_egress` is an
@@ -75,10 +77,9 @@ operator-set flag (`run.py:~1025,~1739`, surfaced in the NetNanny challenge) and
 operator code can POST decrypted prompts anywhere. Egress-off still leaves covert channels
 (response timing/embedding, operator-readable logs).
 
-**Why this matters for the audit's confidentiality conclusion.** DEVPROOF-REPORT.md grades
-E2E confidentiality "real — conditional on F3 (verify-then-encrypt)." This adds a **second
-condition: conditional on the application code being measured**, which it is not. So even a
-client that does everything right (DCAP sig, debug-off, `report_data[0:32]==SHA256(nonce‖
+**Why this matters for the confidentiality conclusion.** E2E confidentiality is conditional not only
+on verify-then-encrypt (I2) but on a **second condition: that the application code is measured**, which
+it is not. So even a client that does everything right (DCAP sig, debug-off, `report_data[0:32]==SHA256(nonce‖
 e2e_pubkey)`, golden MRTD) gets confidentiality against the **control plane and miner-host**
 (they see ciphertext) but **not against the chute operator**, who authors the in-enclave code
 that touches plaintext. On `llm.chutes.ai`, users select a model without knowing or trusting
@@ -96,10 +97,10 @@ at the application layer. The exposure is real only where there is a **trust sep
 offered *as* "private inference" to downstream apps/users (chutes' own `llm.chutes.ai` models, or a
 third party reselling a chute as confidential). In self-tenant use you are trusting your own code
 and there is no victim. The live exfil demo is **evidence the gap is load-bearing**, not a claim of
-external exploitability — and it is a *stronger* devproof finding than model-substitution (F1)
+external exploitability — and it is a *stronger* devproof finding than model-substitution alone
 because it bears on **confidentiality**, the headline claim, not just model identity.
 
-In the guide's **Prompt-Path Test** terms (AUDIT-GUIDE.md): the entire chute `serve.py` is an
+In the guide's **Prompt-Path Test** terms: the entire chute `serve.py` is an
 operator-controlled slot **on the prompt path** (it receives decrypted plaintext) and is
 unmeasured → fails Stage 1 §4 (no operator access to secrets) and §7 (no backdoor paths). It
 is the maximal prompt-path failure — the operator owns *all* the code that sees plaintext.
@@ -182,7 +183,7 @@ Chutes granting quota** — itself a finding.
 
 - **Measure the workload.** Extend `SHA256(image_digest ‖ model ‖ revision ‖ serve.py)` into
   RTMR3 and publish model-keyed golden values — covers both A (which model) and B (which
-  code). This is F1's fix, widened to include the application code.
+  code). This is the model-measurement fix, widened to include the application code.
 - **Disclose the code.** Even public chutes hide the registered `code` (confirmed: `code:
   null` on a public `-TEE` chute), so a client can't read which model/handler is declared.
   Publish it (or `chutes share` to the verifier) so the measured value has a readable preimage.

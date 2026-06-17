@@ -1,40 +1,43 @@
-# Chutes Confidential Inference — Case Study
+# Chutes Confidential Inference — DevProof Case Study
 
-Audit of [chutes.ai](https://chutes.ai) confidential (`-TEE`) inference — serverless AI on **Bittensor subnet 64** (Rayon Labs), Intel TDX + NVIDIA confidential-compute GPUs, ML-KEM-768 E2E encryption. The framework's first **Bittensor-subnet** case and first **non-dstack custom TDX stack** (own attestation service, own measurement registry, own LUKS key release).
+Audit of [chutes.ai](https://chutes.ai) confidential (`-TEE`) compute — serverless AI on **Bittensor
+subnet 64** (Rayon Labs / chutesai), Intel TDX + NVIDIA confidential-compute GPUs, ML-KEM-768 E2E. The
+cohort's first **Bittensor-subnet** case and first **non-dstack custom TDX stack** (own attestation
+service, measurement registry, LUKS key release).
 
-**Audit date:** 2026-05-25
-**Repos:** `rayonlabs/chutes` `08d79872` · `rayonlabs/chutes-api` `77b6f355` · `rayonlabs/chutes-miner` `7afea4b1`
-**Live:** 12 `confidential_compute` models, 10 measurement configs (h200 / b200 / RTX PRO 6000).
+**The headline.** The cryptographic core is sound and hardware-rooted — verified live. But the chute's
+**application code and model run unmeasured inside the enclave**, so a verified quote proves "genuine
+TDX+GPU running *a* Chutes-blessed base image," not "*this* model on *this* code." That single fact is a
+**confidentiality + identity** gap for a consumer and a **provability** gap for a provider — and it is
+demonstrated live (a $0 model swap and cross-user prompt exfiltration on a `verified=True` enclave). The
+miner (host) is *not* the threat — it is contained by a measured admission controller; the residual trust
+is in Chutes' control plane and the chute operator.
 
-## TL;DR
+## Read in this order
 
-The crypto core is sound and hardware-rooted — confirmed live: per-request freshness, `report_data[0:32]==SHA256(nonce‖e2e_pubkey)`, debug off, ML-KEM key in-TD, relay sees only ciphertext, MRTD matches the published golden set. **But five gaps keep it short of "verify without trusting us":**
-
-1. **F1 (High)** — served model is in no measured register; the launch-command check and weight-digest monitor are both disabled on the TEE path. Model substitution passes attestation.
-2. **F2 (High)** — golden MRTD/RTMRs are operator-asserted ConfigMap constants; the VM image has no published reproducible build and no on-chain anchor. TOFU.
-3. **F3 (High)** — `/e2e/instances` hands out `e2e_pubkey` with no quote; the shipped `test_e2e_client.py` encrypts to it without verifying → silent control-plane MITM.
-4. **F4 (Low–Med)** — GPU genuineness / CC-mode / RIM verdict only via NVIDIA NRAS cloud call; no offline path.
-5. **F5 (Med)** — rootfs LUKS key is one static fleet-wide `LUKS_PASSPHRASE`.
-
-## File guide
-
-| File | Purpose |
+| File | What it is |
 |---|---|
-| `DEVPROOF-REPORT.md` | **Canonical report.** Quick Status, architecture, what's verifiable, F1–F6, stage assessment, recommendations, reproduction. Start here. |
-| `OPERATOR-CODE-EXFIL-2026-06-16.md` | **Live operator-side update (2026-06-16).** $0 model swap under a fixed advertised name on a `verified=True` enclave; escalates F1's unmeasured-code root cause to a **prompt-exfiltration** gap (operator code sees E2E plaintext in-TD). |
-| `RECON.md` | Initial recon notes (framework-vs-service distinction, flow map, live snapshot). Superseded by the report for findings. |
-| `verify/verify_chutes.py` | Live reproducer — six checks incl. model-substitution. ~5s, needs an API key in `/tmp/ck`. |
-| `ISSUES-DRAFT.md` | File-able GitHub issues (F1–F5) framed as verifiability gaps. |
-| `refs/` | Untracked clones of the three repos (re-fetch commands in `.gitignore`). |
+| [`PLATFORM.md`](./PLATFORM.md) | **Start here.** Shared facts both reports assume: the sound crypto core (verified live), base-image provenance (reachable via `sek8s`), miner containment (the measured admission + TEE-gated LUKS), the root unmeasured-code gap, and lower-tier items. |
+| [`REPORT-inference.md`](./REPORT-inference.md) | **Consumer surface** — you call a hosted `-TEE` model you didn't deploy. Can anyone read your prompts; is the model real? (I1 plaintext default · I2 verify-then-encrypt optional · I3 unmeasured operator code → exfil + substitution) |
+| [`REPORT-rental.md`](./REPORT-rental.md) | **Provider surface** — you deploy your own chute (cords/jobs) on a rented GPU. Does *my* code run, and can I prove it? (R1 server-side build/sign · R2 admission controller · R3 confidential-vs-miner-not-Chutes · R4 Jobs unaudited) |
+| [`OPERATOR-EXFIL-POC.md`](./OPERATOR-EXFIL-POC.md) | Dated live demonstration (2026-06-16/17, self-deployed chute on the author's own account): the $0 model swap and the egress-free cross-user prompt exfiltration that make the unmeasured-code gap concrete. |
+| [`ISSUES-DRAFT.md`](./ISSUES-DRAFT.md) | The findings as file-able GitHub issues, framed as verifiability gaps, in priority order. |
+| [`verify/verify_chutes.py`](./verify/verify_chutes.py) | ~115-line standalone reproducer. Hits the live `api.chutes.ai` and checks the five crypto-core properties **and** the model-substitution gap (check [6]: two different `-TEE` models, byte-identical quote). ~5s, needs an API key in `/tmp/ck`. This is the runnable evidence behind the reports. |
+| `refs/` | Local clones of the four source repos — **gitignored, not committed**; re-fetch commands are in `.gitignore`. |
 
 ## Reproduce (no payment, ~5s)
 
 ```bash
 # API key in /tmp/ck (Bearer cpk_...)
 curl -s -H "Authorization: Bearer $(cat /tmp/ck)" https://api.chutes.ai/servers/tee/measurements | jq 'length'   # 10 configs, 1 MRTD
-python3 verify/verify_chutes.py     # [1]-[6]: binding, freshness, debug, cert, golden-match, model-substitution
+python3 verify/verify_chutes.py     # [1]-[5] crypto core + [6] model-substitution
 ```
 
 ## Vendor channel
 
-Findings are framed as **devproofness/verifiability gaps** suitable for public issues on the `rayonlabs/chutes-api` / `rayonlabs/chutes` repos (see `ISSUES-DRAFT.md`), not exploits. F3 (default-insecure example client) and F1 (model not measured) are the ones to lead with.
+Findings are framed as **verifiability / devproofness gaps** suitable for public issues on the
+`chutesai/chutes-api` / `chutesai/chutes` repos (see `ISSUES-DRAFT.md`), not as exploits. The two to lead
+with: the **default path is plaintext at the control plane** (so "not even we can see your data" holds only
+on the opt-in E2E path), and the **chute's code + model are unmeasured** (so neither a consumer's privacy
+nor a provider's "my code ran" is third-party-verifiable). The crypto core, the contained miner, and the
+reachable base-image provenance are genuine strengths and are credited as such.
