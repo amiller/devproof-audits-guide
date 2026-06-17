@@ -1,0 +1,40 @@
+name: Refresh Redpill fleet status
+
+# Regenerates the live dev/prod status block in the redpill fleet-inventory
+# doc from the Redpill attestation API, roughly every 72h. cron uses a
+# day-of-month step (*/3), so cadence is ~3 days with a shorter gap at each
+# month boundary. Also runnable on demand via the Actions tab.
+# Note: GitHub disables scheduled workflows after 60 days with no repo
+# commits; this job commits when content changes, which keeps it alive.
+
+on:
+  schedule:
+    - cron: '0 6 */3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-fleet-status
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate live status block
+        run: ./case-studies/redpill-federated-inference/refresh-fleet-status.sh
+      - name: Commit if changed
+        run: |
+          doc=case-studies/redpill-federated-inference/fleet-inventory.md
+          if git diff --quiet -- "$doc"; then
+            echo "no change"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$doc"
+            git commit -m "redpill fleet-status: auto-refresh live dev/prod block"
+            git push
+          fi
