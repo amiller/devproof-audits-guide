@@ -21,6 +21,7 @@ The crypto core is sound and hardware-rooted — confirmed live: per-request fre
 | File | Purpose |
 |---|---|
 | `DEVPROOF-REPORT.md` | **Canonical report.** Quick Status, architecture, what's verifiable, F1–F6, stage assessment, recommendations, reproduction. Start here. |
+| `OPERATOR-CODE-EXFIL-2026-06-16.md` | **Live operator-side update (2026-06-16).** $0 model swap under a fixed advertised name on a `verified=True` enclave; escalates F1's unmeasured-code root cause to a **prompt-exfiltration** gap (operator code sees E2E plaintext in-TD). |
 | `RECON.md` | Initial recon notes (framework-vs-service distinction, flow map, live snapshot). Superseded by the report for findings. |
 | `verify/verify_chutes.py` | Live reproducer — six checks incl. model-substitution. ~5s, needs an API key in `/tmp/ck`. |
 | `ISSUES-DRAFT.md` | File-able GitHub issues (F1–F5) framed as verifiability gaps. |
