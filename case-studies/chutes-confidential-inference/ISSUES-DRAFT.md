@@ -77,7 +77,7 @@ default, bound to the specific `instance_id`+`e2e_pubkey`; fix the sample.
 
 ## Issue 4 (provider) — Tenant images are built & signed server-side; tenant holds no key and no digest
 
-**Repo:** `chutes-api` · **Severity:** High (provider/rental surface)
+**Repo:** `chutes-api` · **Severity:** High (reseller surface)
 
 `forge` builds the tenant image and signs it with Chutes' key (`api/image/forge.py:644-676`,
 `cosign sign --key {settings.cosign_key}`); the tenant signs nothing and cannot compute "their" digest. The

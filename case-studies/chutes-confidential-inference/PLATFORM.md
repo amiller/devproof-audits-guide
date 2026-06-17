@@ -1,8 +1,8 @@
 # Chutes — Shared Platform Facts
 
-Facts common to both Chutes surfaces (consumer inference, provider rental). The two
+Facts common to both Chutes surfaces (end-user inference, reseller). The two
 reports — [`REPORT-inference.md`](./REPORT-inference.md) and
-[`REPORT-rental.md`](./REPORT-rental.md) — assume everything here and do not restate it.
+[`REPORT-reseller.md`](./REPORT-reseller.md) — assume everything here and do not restate it.
 
 **Target:** `chutes.ai` — serverless AI on Bittensor **subnet 64** (Rayon Labs / chutesai).
 Confidential (`-TEE`) workloads on Intel TDX + NVIDIA confidential-compute GPUs, ML-KEM-768 E2E.
@@ -48,7 +48,7 @@ operator can apply.
 
 2. **Chutes customer → their own customers: "Can I prove that inference runs without me — or Chutes — seeing
    the data?"**
-   Covered by [`REPORT-rental.md`](./REPORT-rental.md). Today, no: the customer's `serve.py` is built and
+   Covered by [`REPORT-reseller.md`](./REPORT-reseller.md). Today, no: the customer's `serve.py` is built and
    signed by Chutes server-side and bound to no measured register, so the customer cannot point their
    downstream users at an attestation that proves *which* code touched the plaintext (R1). This is about a
    Chutes customer **passing a confidentiality guarantee through** to their own users.
@@ -160,7 +160,7 @@ The permissionless miner is outside the trust boundary, and three measured mecha
 
 **Consequence:** the original report's "a compromised *miner* can swap the model" is **refuted**. The
 threats that remain are *trusting Chutes' control plane* (consumer report) and *trusting Chutes' server-side
-build + signing key* (rental report) — not the host.
+build + signing key* (reseller report) — not the host.
 
 ---
 
@@ -178,7 +178,7 @@ validator at `:1728`), and the weight-digest monitor explicitly excludes TEE (`w
 A verified quote therefore proves "genuine TDX+GPU running *a* Chutes-blessed base image," not "*this* model
 on *this* code." The same fact is a **confidentiality + identity** gap for a consumer
 ([`REPORT-inference.md`](./REPORT-inference.md)) and a **provability** gap for a provider
-([`REPORT-rental.md`](./REPORT-rental.md)).
+([`REPORT-reseller.md`](./REPORT-reseller.md)).
 
 **Fix (shared):** extend `SHA256(image_digest ‖ model ‖ revision ‖ serve.py)` into RTMR3 and publish
 model-keyed golden values; disclose the registered chute `code` (currently `code: null` even on public

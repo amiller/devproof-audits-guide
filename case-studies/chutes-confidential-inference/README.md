@@ -13,7 +13,7 @@ breaks two different promises to two different parties (see [`PLATFORM.md §0`](
 1. **An end user cannot verify that Chutes isn't seeing their data** — the default path is plaintext at the
    control plane, and even the E2E path ends in unmeasured, Chutes-built code. → [`REPORT-inference.md`](./REPORT-inference.md)
 2. **A Chutes customer cannot prove to *their* users that inference runs without anyone seeing the data** —
-   their `serve.py` is built+signed by Chutes and bound to no measured register. → [`REPORT-rental.md`](./REPORT-rental.md)
+   their `serve.py` is built+signed by Chutes and bound to no measured register. → [`REPORT-reseller.md`](./REPORT-reseller.md)
 
 It is demonstrated live (egress-free cross-user prompt exfiltration from a `verified=True` enclave). The
 miner (host) is *not* the threat — it is contained by a measured admission controller; the residual trust is
@@ -26,7 +26,7 @@ the plaintext path). There is no client- or operator-side workaround; the fix is
 |---|---|
 | [`PLATFORM.md`](./PLATFORM.md) | **Start here.** Shared facts both reports assume: the sound crypto core (verified live), base-image provenance (reachable via `sek8s`), miner containment (the measured admission + TEE-gated LUKS), the root unmeasured-code gap, and lower-tier items. |
 | [`REPORT-inference.md`](./REPORT-inference.md) | **Question 1 — end user vs Chutes.** You call a hosted `-TEE` model you didn't deploy: can you verify Chutes isn't reading your prompts? (I1 plaintext default · I2 verify-then-encrypt optional · I3 unmeasured operator code → exfil + substitution) |
-| [`REPORT-rental.md`](./REPORT-rental.md) | **Question 2 — Chutes customer vs their own users.** You deploy a chute and resell it as private inference: can you prove to your users that neither you nor Chutes sees their data? (R1 server-side build/sign · R2 admission controller · R3 confidential-vs-Chutes · R4 Jobs unaudited) |
+| [`REPORT-reseller.md`](./REPORT-reseller.md) | **Question 2 — Chutes customer vs their own users.** You deploy a chute and resell it as private inference: can you prove to your users that neither you nor Chutes sees their data? (R1 server-side build/sign · R2 admission controller · R3 confidential-vs-Chutes · R4 Jobs unaudited) |
 | [`OPERATOR-EXFIL-POC.md`](./OPERATOR-EXFIL-POC.md) | Dated live demonstration (2026-06-16/17, self-deployed chute on the author's own account): egress-free cross-user prompt exfiltration from a `verified=True` enclave, the concrete evidence for the unmeasured-code gap. |
 | [`ISSUES-DRAFT.md`](./ISSUES-DRAFT.md) | The findings as file-able GitHub issues, framed as verifiability gaps, in priority order. |
 | [`verify/verify_chutes.py`](./verify/verify_chutes.py) | ~115-line standalone reproducer. Hits the live `api.chutes.ai` and checks the five crypto-core properties **and** the model-substitution gap (check [6]: two different `-TEE` models, byte-identical quote). ~5s, needs an API key in `/tmp/ck`. This is the runnable evidence behind the reports. |

@@ -149,7 +149,7 @@ established devproof posture. **Ask:** grant audit quota, or document the job-pa
 
 ---
 
-## Stage assessment (rental surface)
+## Stage assessment (reseller surface)
 
 - **Confidentiality vs untrusted host (the rental value prop):** strong and hardware-rooted. Reaches the
   "GPU owner can't see in" bar.

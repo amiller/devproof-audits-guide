@@ -70,7 +70,7 @@ protect against the network and the host (miner-swap is refuted —
 [PLATFORM §3](./PLATFORM.md#3-the-miner-is-contained-a-malicious-host-cannot-swap-code-or-read-memory)). The
 exposure is real only where there is a **trust separation** — a consumer relying on an operator they don't
 control. In self-tenant use you trust your own code and there is no victim (that case is
-[`REPORT-rental.md`](./REPORT-rental.md)).
+[`REPORT-reseller.md`](./REPORT-reseller.md)).
 
 **Client-side mitigation exists for substitution, not for exfil.** Model *substitution* can be caught without
 Chutes' cooperation by **logit fingerprinting** over the verified-E2E channel (greedy challenge prompts,
