@@ -53,6 +53,7 @@ See [framework/STAGE-1-CHECKLIST.md](framework/STAGE-1-CHECKLIST.md) for detaile
 | [phala-private-ai-verifier](case-studies/phala-private-ai-verifier/) | 0 | Attestation-only SDK; no E2EE code, `signing_public_key` never read, "verified" is not confidentiality |
 | [tinfoil-confidential-inference](case-studies/tinfoil-confidential-inference/) | ~1 | Closes the Phala/NEAR compose-hash gap (config sha256 in launch-measured cmdline). Model weights are dm-verity-anchored with HF commit pinned in the attested config — runtime tampering produces EIO, no HF-by-name fetch like NEAR AI. Per-model enclaves fully attested; router has 2 externally-sourced slots (`DOMAIN`, `USAGE_REPORTER_SECRET`) — code-trace-shown to be off the prompt path |
 | [xordi-toy-example](case-studies/xordi-toy-example/) | **1** | Reference implementation with Base KMS |
+| [trustedrouter-confidential-router](case-studies/trustedrouter-confidential-router/) | ~1 | First **GCP Confidential Space** study. Clean chain (Google-signed EAT JWT, `eat_nonce[0]==SHA-256(TLS leaf)`, digest==published) and routing is locked/attested (hardcoded upstream URLs, control plane can't inject). Top gap **G6**: shared ACME TLS **private key** cached in operator-readable GCS (CMEK not image-bound) → operator can MITM with the genuine cert + relayed attestation, which per-session verification cannot catch. Prompts not persisted; upgrades mooted by verify-each-session |
 
 ## Common Failures
 
