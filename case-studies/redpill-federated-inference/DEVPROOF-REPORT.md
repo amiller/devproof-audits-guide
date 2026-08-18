@@ -1,5 +1,22 @@
 # Redpill Federated TEE Inference — Audit Analysis
 
+> [!IMPORTANT]
+> **Historical — this subject no longer exists.** `api.red-pill.ai` returns 502 on every
+> path as of 2026-08-18, and the per-model `/v1/attestation/report` shapes analysed below
+> are gone with it. RedPill's current surface is the ACI gateway at `tee.redpill.ai`,
+> audited in [redpill-phala-aci-gateway](../redpill-phala-aci-gateway/), with the protocol
+> itself in [aci-protocol](../aci-protocol/).
+>
+> Two findings from this report carried forward and are worth reading here for the lineage:
+> the dev-OS operator root-SSH path (fixed — the current gateway runs the production dstack
+> image, verified 2026-08-18), and "a verified quote is not a verified model", which
+> reappears on the current deployment's legacy compatibility endpoint as **G1**.
+>
+> One claim in this report could not be reproduced in 2026-08: that the production dstack
+> image "installs no sshd and runs `disable_login()`". The published prod and dev 0.5.9
+> archives carry the same `openssh` strings. Treat the prod/dev distinction as resting on
+> the cryptographically bound `is_dev` flag, not on a demonstrated absence of sshd.
+
 **Server-side audit:** 2026-04-20 (verifier-shape probe)
 **Backdoor audit:** 2026-04-28 (compose-level inspection of all 21 `phala/*` models)
 **Domain:** `api.red-pill.ai`

@@ -1,0 +1,4 @@
+# Reproducible with verify/probe_gateway.py and the aci client; only small
+# fixed-size artifacts are kept in the repo.
+aci-sessions-audit.json
+*.tar.gz
