@@ -1,204 +1,277 @@
-# Darkbloom (d-inference) DevProof Audit
+# Darkbloom (d-inference) DevProof Audit — 2026-08-22
 
-**Status as of:** 2026-06-07
+**Status as of:** 2026-08-22 (paid-product relaunch)
 **Subject:** [Layr-Labs/d-inference](https://github.com/Layr-Labs/d-inference) — product brand "Darkbloom" by Eigen Labs
-**Repo HEAD:** `069a6c3`
-**Live coordinator:** `https://api.darkbloom.dev` — EigenCloud app **`d-inference`**, id `0x2ea79ae13e30c0c127d684c3e145a974abce1ce3`
-**Live providers:** 64–67 Apple Silicon Macs at probe time
+**Repo HEAD audited:** `232911ca690b78cbd3c8f65668d69f75a8f6bef0` (2026-08-22) — **251 commits** since the June review (`069a6c3`)
+**Provider line:** v0.8.10 (Swift/MLX; the Rust+PyO3 provider is gone)
+**Coordinator:** self-operated **GCE VM, AMD SEV** — no longer EigenCloud/Intel TDX (§4)
 
-> **Headline.** A malicious provider — *any* Mac owner who joins the network, with **no Darkbloom credential** — can run modified code that reads and tampers with the private prompts it is paid to serve, while passing every attestation check as "hardware verified." This is **not defended against**, it is **inside Darkbloom's own stated threat model**, and it **cannot be fixed on consumer Macs**. That is the finding. Everything else here (the coordinator, the verifiability plumbing) is secondary and, in the coordinator's case, basically fine.
-
-**Document set.**
-- **This file** — current canonical report (2026-06-07).
-- `DEVPROOF-REPORT-2026-05-10.md` — original audit, frozen at HEAD `cf4c0ef`. Architecture diagrams, paper concordance, as-first-written findings.
-- `FOLLOWUP-REPORT.md` — 2026-06-07 multi-agent re-examination of F1–F6 after vendor-claimed fixes.
-- `CHAIN-OF-TRUST.md` — deep cert-chain walk (provider side).
-- `ISSUES-DRAFT.md` — file-able GitHub issues.
-
-**Sources consulted.** (1) The `Layr-Labs/d-inference` repo at `069a6c3` — code is ground truth for behavior. (2) The whitepaper `papers/dginf-private-inference.pdf` — Eigen's own architecture, incl. Definition 2 (threat model), Table 10 ("Coordinator TEE: Intel TDX"), and the §1 admission that App Attest is unavailable on macOS. (3) Live `api.darkbloom.dev`. (4) **EigenCloud** `verify.eigencloud.xyz` + `userapi-compute.eigencloud.xyz/v2/apps/{app}/attestations` — where the coordinator's TDX quotes are published. (5) Eigen's engineering blog `blog.eigencloud.xyz/project-darkbloom-…` ("the coordinator remains part of the trusted routing layer"). (6) Marketing site `darkbloom.dev` and press (Bankless, "replicates Apple PCC"). Claims diverge by venue: the **paper and blog are largely candid; the marketing/press overclaim.**
+> **Method note.** This pass is **source-only**. `api.darkbloom.dev` is blocked by this session's egress policy, so no live probe of the feed, `/v1/stats`, or the release registry was possible. Every claim below is anchored to a file/line at the pinned commit; each claim that a live probe would settle is marked **[LIVE]** with the exact command in §9. The June report's live numbers (60/60 binding, 35-entry EigenCloud attestation history) are **not** re-confirmed here — and §4 gives reason to believe the second one no longer exists.
 
 ---
 
-## 1. The core finding — a malicious provider can read and tamper with your prompts
+## TL;DR
 
-The threat that decides whether the product delivers what it sells: **can a participant who rents out their Mac read and tamper with the prompts they're paid to serve?** Our assessment: **yes — this is not defended against, and it cannot be defended against on consumer Macs.**
+**They built the thing we said was missing.** The June report's headline was that provider code identity had *no remote anchor* on macOS — `binaryHash` was self-measured and self-signed, so a malicious Mac owner could run prompt-logging code and pass every check. Darkbloom's answer, shipped in v0.6.0, is an **APNs code-identity challenge**: the coordinator pushes `E_K(nonce)` to the provider's Apple push token; only a binary carrying Darkbloom's Team ID, App ID, and Apple-signed push provisioning profile can receive that push (AMFI enforces this at launch); the provider decrypts with its registered X25519 key and returns `Sign_SE(nonce)`. Self-reported `binaryHash` has been explicitly **demoted to drift telemetry** in their own threat model. This is the most serious attempt at third-party code attestation on macOS we have audited, and it deserves to be said plainly: **the June finding was taken seriously and substantially engineered against.**
 
-This adversary is **squarely inside the whitepaper's own threat model**, not one we invented ([Definition 2](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/papers/dginf-private-inference.pdf) grants the adversarial provider the ability to *"execute arbitrary code as root"* and *"install any user-level software"*). It is explicitly *not* limited to running the genuine binary. So the paper is on the hook to defend against exactly this.
+**Four things now stand between that mechanism and the guarantee the product sells:**
 
-**What the Apple anchor (MDA) actually proves — and what it can't.** The only Apple-rooted attestation in the system is **[Managed Device Attestation (MDA)](https://support.apple.com/guide/deployment/managed-device-attestation-dep28afbde6a/web)**, Apple's MDM feature for proving facts about a managed *device*. Mechanically: the Mac generates a Secure Enclave key; Apple's attestation servers confirm it is genuine Apple hardware and issue an X.509 certificate — chaining to Apple's attestation root — whose fields carry the device's serial, UDID, OS/SepOS versions, security-configuration bits, and a freshness nonce. Verifying that chain proves exactly three things: *this is genuine Apple silicon*, *with these device/OS properties*, *and a particular SE key lives in its enclave*. It proves **nothing about which application or code is running** — MDA has no concept of an app binary or its hash; it binds a key to a *device*, never to a *program*. That is by design: MDA is a fleet-management tool for an organization verifying its own cooperative devices, not a mechanism for attesting code on an adversary-owned machine. Darkbloom uses MDA correctly *as far as it goes* — it even works around the fact that Apple's attested key is locked in a platform keychain by binding its own SE key through the nonce (`freshness = sha256(se_pubkey)`, §9.3). But the anchor MDA provides is **device authenticity, not code authenticity.**
-
-**The unsupported leap — `binaryHash`.** To cross from "genuine device" to "running the blessed code," the design adds one more field, and this is where the chain breaks. The paper's defense against a modified binary is the `binaryHash` field (§7.1, Table 1): *"binaryHash — the SHA-256 hash of the running provider binary… A non-matching hash indicates modified code, and the provider is rejected. This prevents an adversary from patching the binary to bypass security checks."* The flaw is that **`binaryHash` is computed by the provider binary over itself and then signed by the provider's own Secure Enclave key. The SE signs the bytes it is handed; it does not *measure* the binary** (unlike SGX `EREPORT` or a TDX launch measurement). So the defense asks a possibly-malicious binary to honestly report whether it is malicious. An adversary who "can execute arbitrary code as root" — the paper's own Definition 2 — simply reports a blessed hash while running different code. The check is circular. Two conflations make it *look* airtight: (1) MDA's *device* attestation is treated as if it carried over to *code* (it doesn't); and (2) "binaryHash in the **SE-signed** attestation" sounds hardware-measured, but it is only hardware-**signed over a self-supplied value** — *signed ≠ measured.* Neither device-attested nor SE-signed gets you code-attested.
-
-**The attack, concretely.** A malicious owner runs a prompt-logging (and/or answer-tampering) build on one genuine, MDM-enrollable Mac. They never touch the System volume, so SIP/Secure Boot/SSV stay genuinely on and MDA passes; they generate their own SE key, bind it via the MDA nonce, and report a blessed `binaryHash` (and `mlx_metallib`). All coordinator checks (`provider.go:835-907`) pass, the provider is marked "hardware verified," real users' prompts are routed to it, and it is **paid** to receive them. Responses it returns are signed by its own hardware-verified key, so manipulated answers also read as verified.
-
-**Two questions, stated so they cannot be misread:**
-
-> **Q1 — Does the coordinator verify the provider binary is code-signed by Darkbloom?**
-> **No.** There is *no* code-signing / Team-ID / cdhash check of the provider anywhere in the coordinator (grep of the tree: the only code-signing logic is the coordinator signing its *own* MDM profiles). The coordinator's sole input about provider code is the self-reported `binaryHash`.
->
-> **Q2 — Does the attack require Darkbloom's code-signing key?**
-> **No.** The attacker signs their own build with their own identity (or ad-hoc), and uses their own self-generated SE key. The *legitimate* protocol already uses a self-generated SE key bound only to the *device* via the MDA nonce — by design (§9.3), because Apple's app-bound attested keys are inaccessible to third-party apps. The attacker does the identical thing. **No Darkbloom credential is involved at any step.**
-
-Because no Darkbloom key is needed, the attack is open to **any of the Mac owners who join the network**, not just a Darkbloom insider. (The insider variant — Eigen Labs shipping a backdoored build under the real Team ID, or blessing a backdoored hash via `POST /v1/releases` — also works and is strictly broader, but it is not required.)
-
-**Is this fixable? Three tiers:**
-
-| Tier | Adversary | Fixable on macOS? | Why |
-|---|---|---|---|
-| 1 | external auditor can't *check* a claim (F-list) | **Yes — engineering** | publish the SE-signed blob + binding; complete the web verifier. No Apple dependency. |
-| 2 | lone Mac owner runs a self-signed build, reports a blessed hash | **No stock Apple primitive** | The signer-granular option — **App Attest** — returns [`isSupported == false` on macOS](https://developer.apple.com/documentation/devicecheck/dcappattestservice/issupported) (Apple's own docs: "if you read isSupported from an app running on a Mac device, the value is always false"; the whitepaper says so too, §1); it is iOS/iPadOS-only. The SE key is bare (`SecureEnclave.P256.Signing.PrivateKey()`, no Apple cert); no public boot-measurement/PCR API exists. So **nothing remotely anchors *which app* is running.** The only defenses are the SIP/code-signing arguments — which protect the *System* volume, not the writable-Data-volume provider binary the owner can re-sign. |
-| 3 | malicious/compromised Darkbloom signer | **No — Apple doesn't offer it** | Build-exact remote attestation of third-party code (cdhash export) exists only for Apple's own PCC servers. Even on iOS, App Attest would be *signer-granular* (MRSIGNER), never build-exact (MRENCLAVE). |
-
-So **provider code identity has no remote cryptographic anchor on today's macOS at all** — it is *self-report only*. Be precise about which half this is: the **device + posture** layer (genuine Apple hardware, SIP/Secure Boot/SSV on) **is** soundly and remotely attested via MDA/MDM/SE — that part works. It is specifically the **inference-code identity** — the thing that determines whether the running code reads your prompt — that is unanchored. A server-TEE provider (TDX/SGX, like Darkbloom's *own* coordinator) measures the code at launch and has none of this gap; the consumer-Mac thesis inherently does.
-
-**What the whitepaper claims vs. what holds.** The paper's Theorem 1 ("SIP Runtime Immutability") is correct but narrow — it proves SIP cannot be *disabled* mid-process (doing so needs a reboot, which kills the process). It says nothing about *which binary* is running. The paper over-extends it: §9.3 ("SIP enforcement preventing binary replacement") and Table 1 ("Code signing + SIP: macOS refuses modified signed binaries") treat binary replacement as blocked, and Table 10 lists the **residual attack as "physical probing," the same as Apple PCC.** That is too strong: the substitution attack above is a *software* residual that needs no physical probing — a self-signed build on the Data volume with a self-reported blessed hash is caught by none of SIP (System-volume only), code signing (signer-granular, owner self-signs), or the hash check (self-reported). To the paper's credit it is candid elsewhere — it states App Attest is unavailable on macOS, that the hardware owner is adversarial (a harder setting than PCC), and that MDA enrollment for arbitrary consumers is unsolved. The gap is localized, but it is load-bearing: it is the exact property the product is sold on.
-
----
-
-## 2. How it works
-
-A request crosses **two trust domains** and is decrypted **twice** — once at the coordinator, once at the provider. There is no consumer→provider end-to-end encryption.
-
-```
-Consumer (OpenAI-compatible client / web console / curl)
-   │  HTTPS to api.darkbloom.dev.
-   │  Default = plaintext JSON. Sealed mode (opt-in) = encrypted to the
-   │  COORDINATOR's X25519 key (kid 833aec78…) — protects the wire to the coordinator.
-   ▼
-COORDINATOR  (Go) — runs in a GCP Confidential VM with Intel TDX, under EigenCloud
-   │  • Decrypts the request (box.Open, sender_encryption.go:177) to read the model.
-   │  • Routes by model/capacity; RE-ENCRYPTS the body to the chosen provider's
-   │    X25519 key and forwards (consumer.go dispatchOneProvider).
-   │  • Holds plaintext in memory only. Persists token COUNTS for billing
-   │    (store RecordUsage*, no prompt columns). Telemetry allowlist-filtered
-   │    ("prompt/response content MUST NEVER appear", telemetry_handlers.go:46).
-   │  • ATTESTED: live Intel TDX quote (MRTD/RTMRs) + GCP vTPM, published on
-   │    EigenCloud (§3). The operator does NOT see the plaintext — the TEE seals it.
-   ▼
-PROVIDER  (Swift) — third-party Apple Silicon Mac, in-process MLX (no vLLM)
-   │  • Apple SE P-256 key + MDA cert chain → Apple attestation root.
-   │    Attests genuine device + posture (SIP/Secure Boot/SSV) + OS versions.
-   │  • Self-reports binaryHash + mlx_metallib hash, signed by its own SE key;
-   │    coordinator checks them against a Darkbloom allowlist (NOT a measurement — §1).
-   │  • Decrypts the prompt; runs inference on hardware the owner controls.
-   ▼
-   plaintext exists in two places: coordinator TEE memory, and provider memory.
-```
-
-The two ends are not symmetric, and this is the whole story:
-
-- **At the coordinator**, the process decrypts each prompt to route it — but it runs inside an **attested Intel TDX TEE**, so **Eigen Labs, the operator, does not see the plaintext.** The TEE is exactly what makes "the operator can't read it" *true* on this side (verified in §3).
-- **At the provider**, the prompt is decrypted on a Mac whose owner can read its own memory, and — per §1 — the attestation **cannot prove the running code won't.** This is where "the operator/host can't see your data" actually fails.
-
-So the marketing line "the operator cannot see your data" is *true for the coordinator* (via the TEE) and *false for the provider* (the substitution attack). The danger is the node that ultimately decrypts your prompt, not the matchmaker in the middle.
-
----
-
-## 3. Is the operator (Eigen Labs / the coordinator) honest? — largely yes, and verifiable
-
-The coordinator decrypts your prompt, so a natural worry is "can Eigen Labs read my inference at the coordinator?" Our assessment: **this is substantially addressed and nearly fully verifiable — we do not consider the coordinator a meaningful avenue for Eigen to read prompts.** The chain:
-
-| Link | What it establishes | Status |
+| # | Finding | Severity |
 |---|---|---|
-| (a) Coordinator runs in a real TEE | the cloud host / operator can't read VM memory or attach a debugger | **✓ verified** — live Intel TDX quote + GCP vTPM on EigenCloud |
-| (b) The attested code doesn't retain plaintext | even decrypted, prompts aren't logged/stored/exfiltrated | **✓ audited in source** |
-| (c) Attested image ⇄ public source | the code in the TEE *is* the audited, non-logging code | **provisionally accepted** — closeable, see below |
-| (d) `api.darkbloom.dev` ⇄ this attested app | you're talking to that TEE, not a proxy in front of it | **not yet surfaced** — wiring, not a hole |
+| **N1** | **The code-identity proof is not bound to the attested device.** Posture (MDM/MDA), key possession (SE), and code identity (APNs token) are three independent legs, and *none* of them is cryptographically tied to the machine that actually decrypts the prompt. The pivot is a **self-asserted serial number**. One clean enrolled Mac can vouch for inference running anywhere. | **critical** |
+| **N2** | **Enforcement is an operator env var, defaulting to grace.** `APNS_ENFORCE_AFTER` unset ⇒ un-attested providers still route. Fleet economics push against flipping it (67/176 attestable at last documented count; headless Macs *structurally cannot* attest). Externally checkable only via one aggregate boolean in `/v1/stats`. | **high** |
+| **N3** | **The coordinator TEE leg regressed.** June: Intel TDX on EigenCloud with a public, dated, 35-entry image-digest history — the one link we marked ✓ verified. Today: a self-run GCE VM that GCP reports as **AMD SEV (not SEV-SNP)** with `--maintenance-policy=MIGRATE`, **no published attestation of any kind**, and the boot-time "am I actually confidential?" assertion their own runbook calls a blocker is **not implemented**. | **high** |
+| **N4** | **The paid product's verification UI asserts four guarantees its own code contradicts** — including "Not even Darkbloom servers can read them" — while the Terms and Privacy Policy in the same repo state the opposite, correctly. | **high** |
 
-**(a) is verified.** EigenCloud publishes the coordinator's attestations (`verify.eigencloud.xyz/app/0x2ea79ae1…`; API `userapi-compute.eigencloud.xyz/v2/apps/…/attestations`): `platform: INTEL_TDX`, `mrtd feb74866…`, `rtmr0..3`, GCP vTPM, `image_reference docker.io/eigenlayer/eigencloud-containers@sha256:e891031f…`, with a **35-entry dated history (2026-04-10 → 2026-06-06)** of every image digest. This is a real TEE, externally checkable, no account.
+**Prior findings F1–F6: one fixed, one superseded, four still open** (§6).
 
-**(b) is audited.** In the public tree: decrypt → route → re-encrypt → forward, in memory; billing stores token counts only (`store RecordUsage*`, no prompt columns); telemetry is allowlist-filtered ("prompt/response content MUST NEVER appear", `telemetry_handlers.go:46`); no body logging or persistence.
-
-**(c) is provisionally accepted, not a gap we weight.** The attested artifact is EigenCloud's generic platform container launched via `compute-source-env.sh`, so the MRTD/RTMRs don't *by themselves* prove "commit X of `Layr-Labs/d-inference`, reproducibly built." Closing this is ordinary work — a reproducible build checked against EigenCloud's `/builds/verify` — and we provisionally accept the correspondence. It is unfinished verification, not a meaningful hole. (EigenCloud's own README notes Mainnet Alpha "still trusts the developer," so the platform doesn't yet *enforce* image↔source, but that bounds the strength of the guarantee, it doesn't open a practical avenue.)
-
-**(d) is a surfacing/wiring task.** The attestation isn't linked from `darkbloom.dev`, not bound to the TLS endpoint, and not checked by the SDK before sending — so a user has no in-band reason to even look at it. That's worth fixing (the TEE the company runs is currently invisible to the user it protects), but it's plumbing, not a broken guarantee.
-
-**Bottom line for the operator threat:** sound trust model, real TEE, non-retaining code, two items of unfinished verification that are straightforward to close. Contrast sharply with §1, which is a real, unfixable hole.
+The honest claim Darkbloom can make today: *"we route only to Macs that Apple's MDM channel says are SIP-locked and Secure-Boot-full, and — when enforcement is on — only to processes that could receive an Apple push addressed to our signed application."* It still cannot say "the node operator never sees your data" (N1, N2), and it can no longer say the coordinator side is externally verifiable at all (N3).
 
 ---
 
-## 4. Other findings (F1–F6 + new)
+## 1. What changed since 2026-06-07
 
-| # | Finding | Status | Note |
+| Area | June (`069a6c3`) | Today (`232911ca`) |
+|---|---|---|
+| Provider code identity | self-reported `binaryHash` only | **APNs code-identity round-trip** (v0.6.0); `binaryHash` demoted to telemetry, enforcement behind default-off `EIGENINFERENCE_BINARYHASH_ENFORCE` (`main.go:399`) |
+| Coordinator substrate | EigenCloud app `0x2ea79ae1…`, Intel TDX, public quote history | **self-run GCE VM, AMD SEV, `MIGRATE`**, nothing published (§4) |
+| Provider runtime | Rust + PyO3 + embedded Python | Swift + mlx-swift only; Python backend un-routable (`privateTextBackendSupported`) |
+| Posture signature scope | nonce+timestamp only (fields unsigned) | **`BuildStatusCanonical`** now signs `sip_enabled`, `secure_boot_enabled`, `binary_hash`, `model_hashes`, `runtime_hash`, templates over a coordinator nonce (`attestation/attestation.go:390`) — a real fix |
+| Prompt at rest | "memory wiped after each request" | **encrypted SSD prefix cache** on provider disk (AES-256-GCM, SE-rooted KEK, HMAC-named blocks), per-account scope |
+| Commercial surface | none | Stripe checkout + Connect payouts, API keys, Privy auth, invite codes, referrals, provider-set pricing, **OpenRouter as a wholesale consumer** |
+| New coordinator surfaces | — | `mediafetch` (server-side URL fetch), `promptsidecar` (Rust prompt-render subprocess), prompt-contract cache routing |
+| Threat modelling | none in repo | `docs/threat-model.yaml` — 2,665 lines, STRIDE, per-finding mitigations and status |
+
+Two commits are worth naming for credit: **#612 "harden provider plaintext egress paths"** (Aug 14) closed real leaks — inline video plaintext hitting disk, free-form provider error strings crossing to clients, automatic provider log upload, browser free-form telemetry — and **#530**'s `mediafetch` SSRF guard is genuinely good work (§7).
+
+---
+
+## 2. N1 — the code-identity proof is not bound to the device it vouches for
+
+### The mechanism
+
+`docs/architecture/decisions/apns-code-attestation.md` states the security argument: *"Only a process that (a) is signed with our Developer ID, (b) carries our globally-unique App ID `io.darkbloom.provider`, and (c) is authorized by an Apple-signed provisioning profile with the `aps-environment` entitlement can receive a push for our topic. AMFI enforces code signature, entitlements, and provisioning-profile validity at launch."*
+
+That argument is correct **about the machine on which AMFI is enforcing.** The gap is that the coordinator never learns which machine that is.
+
+### Three legs, one unverified pivot
+
+| Leg | What proves it | Bound to a specific device? |
+|---|---|---|
+| **Posture** (SIP, Secure Boot, SSV) | Apple MDM `SecurityInfo`, queried through MicroMDM | Bound to the **enrolled device whose serial the provider claims** — `s.mdmClient.VerifyProvider(ctx, attestResult.SerialNumber, …)` (`api/provider.go:2689`). The serial is a field in the provider's own attestation blob. |
+| **Key possession** | P-256 signature over a coordinator nonce | **No.** The SE key carries **no Apple certificate** (`SecureEnclaveIdentity` / `PersistentEnclaveKey` create a bare key). Remotely it is an ordinary P-256 key; nothing distinguishes a Secure Enclave key from `openssl ecparam`. |
+| **Code identity** | APNs round-trip to a device token | **No.** `APNsDeviceToken` is copied verbatim from the provider's `RegisterMessage`/`HeartbeatMessage` (`registry/registry.go:2854`, `api/provider_codeattest.go:252`). Nothing cross-checks it against the MDM-enrolled device — not the MDM push token the coordinator already holds for that device, not the UDID, not the serial. |
+
+The MDA leg does not close this. Its freshness nonce is `sha256(se_public_key)`, chosen **by the coordinator** and echoed by Apple into the cert (`api/provider.go:3145`). It proves *"the enrolled device answered an attestation request that was about this SE key, just now"* — a sound anti-replay check for cached chains, which is exactly where it is enforced (`attachCachedMDAProof`, `provider.go:3093`). It cannot prove the SE key resides in that device's enclave, because Apple is echoing a value the coordinator supplied, not measuring a key. And on the **fresh** path it is not enforced at all: `provider.MDAVerified = true` is set unconditionally (`provider.go:3221`), with a `Warn` log the only consequence of a mismatch. That is **F1, still open** after 15 months.
+
+### The assembly attack
+
+An attacker who wants to read and tamper with paid prompts needs:
+
+1. **One clean Mac (A)** — genuinely SIP-locked, Secure-Boot-full, enrolled in Darkbloom's MDM through normal onboarding. It never runs modified code; it only answers `SecurityInfo` and `DevicePropertiesAttestation`. Its posture reports are *honest*.
+2. **Machine B** — runs the attacker's own inference server. Its posture is never checked, because the coordinator is checking A's. B holds the X25519 key `K` the coordinator encrypts prompts to, and any P-256 key it likes.
+3. **A push-token source** — a machine where AMFI is not enforcing (SIP disabled + `amfi_get_out_of_my_way`), running a process that claims bundle ID `io.darkbloom.provider` with `aps-environment`, to obtain an APNs device token for Darkbloom's topic. The `E_K(nonce)` payload it receives is **encrypted to the attacker's own key**, so the attacker only needs the ciphertext bytes, which they can relay to B in a second.
+
+B connects to `/ws/provider` — **which requires no authentication whatsoever** (`handleProviderWS`, `provider.go`; `auth_token` is optional and used only for payout account linkage, `provider.go:327`) — registers claiming A's serial, self-reports every `PrivacyCapabilities` flag, the runtime hashes from the published manifest, and the token from (3). The coordinator queries MDM about A (healthy), pushes the challenge to (3)'s token, B decrypts and signs, and B is marked hardware-trusted and code-attested. Prompts route to B. Responses B returns are stamped `X-Provider-Attested: true`.
+
+**Cost to the attacker: one idle clean Mac plus one out-of-policy machine.** No Darkbloom credential, no Apple compromise, no Developer ID.
+
+### What we could not verify, and how they can
+
+The load-bearing assumption is step (3): *can a process on an AMFI-disabled Mac obtain an APNs device token for another team's bundle ID?* Client-side entitlement checking is the only gate we can find in Apple's design, and disabling AMFI removes it — but we could not test this from a Linux sandbox, and we are not going to assert an Apple internal we did not observe.
+
+**The experiment Darkbloom can run in an afternoon** (they have the Macs and the `.p8`): on a spare Mac, disable SIP and boot with AMFI off; ad-hoc-sign a trivial app with `aps-environment` and `CFBundleIdentifier = io.darkbloom.provider`; call `registerForRemoteNotifications`; if a token comes back, push to it with the production `.p8` and topic. If the push arrives, N1 is confirmed as written. If Apple refuses the registration server-side, N1 downgrades to "the binding is missing but the attack is blocked by an Apple property you are not documenting" — which is still worth documenting, because the whole guarantee then rests on it.
+
+**Either way the fix is the same and is cheap:** bind the token to the attested device. The coordinator is already an MDM server for this Mac — it holds *its own* APNs push token for device A. Push the code-identity challenge (or a second, correlating nonce) over the **MDM** channel to A's token and require both to be answered by the same connection, or have the provider include the device token inside the SE-signed status canonical *and* require an MDA round-trip whose freshness nonce covers `sha256(se_pubkey ‖ apns_token)`. Then the three legs collapse into one identity.
+
+### What N1 does *not* say
+
+It does not say the APNs mechanism is worthless. Against the *straightforward* attack — patch the binary in place on your own enrolled Mac and report a blessed hash — it works, and that attack is now closed. The keychain access group (`SLDQ2GJ6TL.io.darkbloom.provider`, `PersistentEnclaveKey.swift:78`) genuinely stops a re-signed binary from reusing the real key or the SSD cache KEK, so the "run the real binary once, then swap" variant is closed too. N1 is about the *composed* system: every individual leg is sound, and the identity they add up to is not.
+
+---
+
+## 3. N2 — enforcement is a config flag, and the fleet argues against flipping it
+
+`providerSupportsPrivateTextLocked` (`registry/registry.go:663`) is a genuinely well-built single chokepoint: no self-route exemption, fail-closed, consulted live so the policy can flip without a reconnect. But:
+
+```go
+func (r *Registry) codeAttestationEnforcedLocked() bool {
+    if !r.codeAttestationConfigured || r.codeAttestationDeadline.IsZero() {
+        return false          // ← grace: un-attested providers still route
+    }
+    return !time.Now().Before(r.codeAttestationDeadline)
+}
+```
+(`registry/registry.go:1016`; deadline comes from `APNS_ENFORCE_AFTER`, `main.go:789-809`.)
+
+Unset or future ⇒ **the code-identity gate is off and the network behaves exactly as it did in June.** `APNS_ENFORCE_AFTER` is listed in `deploy/gcp/prod/required-env-keys.txt`, so prod is *expected* to set it — but the value lives in Secret Manager and is not in the repo. **[LIVE]** `/v1/stats.code_attestation_enforced` is the only external witness, and it is a single fleet-wide boolean with no per-provider detail (`api/stats.go:262`).
+
+The pressure against enforcing is documented in their own planning docs (`routing-v2-attestation-churn.md`, 2026-06-16): the routable pool was **≈67 of 176 providers**, and the rollout runbook expects the pool to *"grow from ~67/176"* only after `APNS_MODE=alert` — a change gated on a security sign-off checklist. Some of the shortfall is structural, not transitional:
+
+- **Headless Macs can never attest.** APNs delivery requires a logged-in GUI session (`ProviderAppKitHost` runs an `NSApplication`); the ADR lists "headless/login-screen providers cannot receive APNs and will be derouted once enforcement begins" as an accepted negative.
+- **Background push is budget-throttled** to ~2–3/hour/device, which is why there is no periodic re-challenge and why a 30-minute **reuse cache** exists — including a **cross-version** reuse path that carries a proof across a binary update without a new round-trip (`provider_codeattest.go:60-115`). The fences on that path (attestation valid, runtime verified, manifest checked, SIP challenge verified, min version, same token) are all values the provider self-reports; the only unforgeable element is the SE key, and per N1 that key is not bound to the device either.
+- The alternative, `APNS_MODE=alert`, sends priority-10 pushes and is safe only because the provider never requests notification authorization — an invariant maintained by code comments and review (their INV-6), not by a platform mechanism.
+
+None of this is dishonest — it is all written down in their own docs, which is more than most subjects manage. The devproof point is narrower: **the single most load-bearing security control in the system is a runtime configuration value that no external party can audit beyond one boolean**, and the commercial incentive (a paid network needs capacity) points the wrong way.
+
+---
+
+## 4. N3 — the coordinator TEE leg went from verifiable to unverifiable
+
+This is the largest *net regression* since June, and it is the leg the June report scored **✓ verified**.
+
+`docs/operations/eigencloud-to-gcp-migration.md` records the move off EigenCloud onto a GCP VM in Eigen's own project. `docs/operations/coordinator-deploy.md:27` describes what actually shipped:
+
+> | Confidential compute | GCP reports AMD **SEV** with maintenance policy `MIGRATE`; Shielded VM Secure Boot, vTPM, and integrity monitoring are enabled. **Do not claim SEV-SNP for this VM.** |
+
+Consequences, in order of importance:
+
+1. **No published attestation, anywhere.** The June evidence — `verify.eigencloud.xyz/app/0x2ea79ae1…` with `platform: INTEL_TDX`, an `mrtd`, RTMRs, a pinned container digest and a **dated 35-entry image history** — described an app that no longer serves this traffic. There is no `/v1/coordinator/attestation` route (full route table, `api/server.go:1719-1992`), nothing in the console or landing page references EigenCloud, TDX, or SEV, and `/api/version` reports the *provider* release, not the coordinator build (`api/version handler`). An outside auditor has **no artifact at all** tying `api.darkbloom.dev` to any particular coordinator code.
+2. **Memory encryption without a published measurement does not constrain the operator.** A TEE protects the guest from the *host*. What protected users from *Eigen* in June was the published image digest — the fact that swapping in a prompt-logging build would have changed a value on a public page. That constraint is gone; only the cloud-host threat is still addressed.
+3. **AMD SEV is not SEV-SNP.** Plain SEV encrypts memory but does not protect its integrity, and its remote-attestation story is materially weaker than SNP's. The runbook's own target was `--confidential-compute-type=SEV_SNP --maintenance-policy=TERMINATE`; what runs is SEV with `MIGRATE`, meaning the platform may live-migrate the VM. Meanwhile the whitepaper's Table 10 still says **Intel TDX**, and `coordinator/api/server.go:11` says "GCP Confidential VM (AMD SEV)". The paper is now wrong about the deployed substrate.
+4. **The confidential-boot assertion was never implemented.** The migration runbook flags it as a Phase-1 blocker in bold: *"the coordinator (or vm-startup) must verify it's actually on a confidential VM and refuse to serve if not. Omitting the flag silently produces a non-confidential VM where the host can read decrypted prompts, with zero error today."* A grep of `coordinator/` and `deploy/` for any confidential-compute assertion returns **only comments** — no check, and `deploy/gcp/bootstrap.sh:296-309` (the committed VM-create path) passes no `--confidential-compute-type` at all. Whether prod was created with the flag is invisible from the repo, and a future rebuild that drops it fails open and silent.
+
+Fixing (1) is a day of work and would restore the strongest verifiable property the system ever had: expose the vTPM/SEV attestation and the running container digest at a public endpoint, keep an append-only history of digests, and publish the build recipe tying a digest to a commit.
+
+---
+
+## 5. N4 — the consumer-facing guarantees contradict the code, the threat model, and the company's own legal pages
+
+The console's verification panel (`console-ui/src/components/verification/NormalMode.tsx:33-70`) shows four claims to every paying user:
+
+| UI claim | Reality at this commit |
+|---|---|
+| **"Hardware Identity** — sealed in Apple's Secure Enclave — it can't be cloned, copied, or faked." Ticked when `trust.secureEnclave`. | That flag is the provider's **self-reported** `secure_enclave` boolean from the feed. The SE key has no Apple certificate; remotely it is an unattested P-256 key (§2). |
+| **"Software Integrity** — its hash matches the signed release." Info text: *"SHA-256 hash of the provider binary is verified against the CI-signed release."* Ticked when `isHardware`. | The hash check is **default-off** and demoted to telemetry (`main.go:399`; threat model T-034: *"no longer relied on as a code-identity control"*). The tick is driven by trust level, not by any hash check. **The UI asserts precisely the control the vendor's own threat model retired — and never mentions the one that replaced it.** |
+| **"Data Protection** — Your prompts are encrypted end-to-end. Not even Darkbloom servers can read them." Info: *"The coordinator only sees ciphertext."* Hardcoded `ok: true // E2E is always active`. | False as a mechanism and as a conclusion. The coordinator decrypts every request to route, meter and render prompts (`sealedTransport` middleware, `consumer.go`, and now the `promptsidecar`). Their **own Privacy Policy** says so: *"The current service architecture requires our coordinator to process request payloads in plaintext"* (`landing/privacy.html:295`), and the **Terms** cite *"the current absence of end-to-end encryption between consumer and provider"* (`landing/terms.html:196`). |
+| **"Anti-Tampering** — memory is wiped after each request." | Prompt-derived KV state now **persists on the provider's SSD across requests and reboots** (encrypted, per-account scoped — see §7). The claim is stale. |
+
+`landing/index.html:1304` still carries the June wording verbatim — *"The coordinator routes ciphertext, and only the matched provider's hardware-bound key can decrypt the request"* — so **F6 is unfixed 10 weeks later**, now on a page that sells a paid service.
+
+Two mechanical problems in the verifier itself:
+
+- **It can verify the wrong machine.** `useDeviceVerification.ts:32-36` looks up the serving provider by serial and falls back to `data.providers?.[0]` — *any* provider in the feed — then runs the chain check and reports success. A user whose provider is absent from the feed sees a green "Verified" for a machine that did not serve them.
+- **It still stops at "genuine Apple device."** The five steps in `lib/cert-verify.ts:144-148` are parse → identity → chain → root fingerprint → confirm; the freshness OID is explicitly *filtered out as "binary data"*, so the MDA→SE binding is not checked (F5, unchanged), and there is no code-attestation check because **the feed does not carry one**.
+
+Which is the deeper problem: **`/v1/providers/attestation` (`provider.go:3269`) does not expose `code_attested` at all** — nor `se_key_bound`, nor the SE-signed blob and signature. The response headers don't either (`X-Provider-Attested`, `-Trust-Level`, `-Mda-Verified`, `-Secure-Enclave`; `dispatch.go:2931-2951`). The public feed advertises the signals that no longer carry the guarantee and omits the one that does. Per-provider, an outsider cannot check the thing that matters.
+
+---
+
+## 6. Prior findings F1–F6
+
+| # | June status | Today | Note |
 |---|---|---|---|
-| **F1** | MDA→SE binding not gated / not in feed | **Partially fixed** | Live binding 60/60 (incidental — forced re-attestation, `a391376`), but no server-side gate and `se_key_bound` still unpublished. (This is device-binding; it does **not** touch the §1 code-identity hole.) |
-| **F2** | Provider feed omits SE-signed blob + signature | **Not fixed** | Posture/`binary_hash`/`encryption_public_key` are coordinator-asserted to outsiders. Publishing them makes the *device + posture* attestation externally checkable; it does **not** fix §1 (the SE signs self-measured values). |
-| **F3** | Coordinator attestation not surfaced to the consumer | **Open (infra exists)** | The TDX quote + image-digest history exist on EigenCloud (§3) but are absent from `api.darkbloom.dev` and unbound to the endpoint (gap d). |
-| **F4** | Provider-binary release registry has no public log | **Open (coordinator covered)** | EigenCloud keeps a dated coordinator image-digest history. The *provider-binary* allowlist (`POST /v1/releases`) still has no public read-only log / Sigstore / on-chain anchor. |
-| **F5** | Client-side verifiers incomplete | **Partially fixed** | Web verifier stops at "Genuine Apple device" (no binding check) though `se_public_key` is now in the feed; no consumer SDK. |
-| **F6** | Marketing misstates the decryption mechanism | **Valid (nitpick)** | `darkbloom.dev` says *"the coordinator routes ciphertext, only the matched provider's hardware-bound key can decrypt"* — false as a mechanism (the coordinator decrypts, `consumer.go:303`), **but the conclusion holds via the TDX TEE**, so it's a wording error, not a broken guarantee. The eng blog is honest; the marketing/press overclaim. Substrate confirmed **GCP + Intel TDX** (paper Table 10; the "AMD SEV-SNP" source comments are wrong). |
-| **NEW** | Unauthenticated MDM webhook trust-injection | **Fixed (in code)** | Solicited-UUID gate + UDID cross-check (#270/#233); not externally distinguishable from a no-op (live endpoint returns 200 to forged POSTs). |
+| **F1** MDA→SE binding not gated / not published | partially fixed | **Open** | Enforced only on the cached-proof path (`provider.go:3077-3093`); the fresh path sets `MDAVerified = true` regardless and logs a warning (`provider.go:3221`). `se_key_bound` reaches only the owner's own `/v1/me/providers`, never the public feed. |
+| **F2** SE-signed blob + signature absent from feed | not fixed | **Open**, partly mitigated | The blob still isn't published, so posture remains coordinator-asserted to outsiders. But `BuildStatusCanonical` (`attestation/attestation.go:390`) now brings `sip_enabled`, `binary_hash`, `model_hashes`, `runtime_hash` **inside** the SE signature over a coordinator nonce — a real fix to the signature-scope hole. (The doc comment at `attestation.go:485-505` still says these fields are *not* signed; stale and misleading.) |
+| **F3** No coordinator attestation surfaced | open (infra existed) | **Worse — see N3** | The infrastructure that made it merely "unsurfaced" no longer exists. |
+| **F4** Release registry has no public log | open | **Open** | `POST /v1/releases` (scoped key), `GET /v1/releases/latest` (public, single record), `GET|DELETE /v1/admin/releases` (admin only). No public history, no Sigstore, no anchor; admin DELETE still silent (`server.go:1836-1903`). Their threat model puts the release supply chain explicitly **out of scope**. |
+| **F5** Client verifiers incomplete | partially fixed | **Open + new defect** | No binding check, no code-attest signal, plus the `providers[0]` fallback (§5). Still no consumer SDK enforcing anything. |
+| **F6** Marketing misstates the mechanism | valid (nitpick) | **Open, upgraded to high** | Same sentence, still shipping (`landing/index.html:1304`), now contradicted by the company's own Terms and Privacy Policy, on a paid product (§5). |
+| *NEW (June)* MDM webhook trust-injection | fixed in code | **Fixed** | Solicited-UUID gate + UDID cross-check retained. |
+| *§1 (June)* no code identity | unfixable-as-stated | **Superseded by N1** | A real remote anchor now exists; it is unbound rather than absent. Genuine progress. |
 
 ---
 
-## 5. Recommendations
+## 7. What genuinely improved — credit where it is due
 
-**The one that matters (Threat §1 — and it's a disclosure, not a patch):**
-1. **Stop claiming a guarantee the substrate can't provide.** On macOS there is no remote way to prove the running inference binary (App Attest unavailable, no cdhash export), so "a malicious provider cannot see your prompt" is not enforceable. Either say so plainly, or move the inference workload onto a substrate that *can* measure code (a server TEE, like the coordinator's own TDX path) — at the cost of the consumer-Mac thesis. Realistic interim mitigations are non-cryptographic (signed/notarized distribution + the SIP/Hardened-Runtime arguments, which bound *tampering* but not a *self-signed replacement*) and should be described as such.
-
-**Coordinator (Threat §3 — close the verification, it's nearly done):**
-2. **Bind `api.darkbloom.dev` to the attested app (d).** Surface the EigenCloud quote in-band and have the SDK/console verify it (ideally TLS-key-bound) before sending.
-3. **Publish the reproducible-build recipe (c)** tying `image_digest` → a `Layr-Labs/d-inference` commit via `/builds/verify`.
-4. **Fix F6 wording:** "the coordinator decrypts inside an attested TEE that doesn't retain prompts"; correct the SEV-SNP→TDX lines.
-
-**Provider verifiability (the half Apple *does* support):**
-5. **Publish the SE-signed blob + `se_key_bound` in the provider feed (F1/F2)** and complete the web verifier's binding check (F5) — makes device + posture externally checkable.
-6. **Route a read-only `GET /v1/releases`** (or Sigstore-sign each registration) so the provider-binary allowlist is auditable (F4).
-
-The honest claim Darkbloom *can* make: **"the operator decrypts inside a verifiable TEE that doesn't retain your prompt, and routes only to genuine, posture-attested Apple devices."** It cannot honestly add "running provably-unmodified inference code" for the provider — Apple offers no mechanism for that on macOS. The distance between that honest claim and "only the node can decrypt" / "replicates Apple PCC" (whose fifth requirement is *verifiable transparency* — build-exact, inspectable images) is the finding.
+- **APNs code identity** (§2) — a creative, correct-in-outline use of the only Apple-gated channel available on macOS, with fail-closed handling throughout: `CodeAttested` is per-connection and never persisted; a rotated token resets it and forcibly invalidates cached proofs; a failed push clears the outstanding nonce; the SE key used for verification is the one bound at registration, never one supplied in the response (`provider_codeattest.go:230-435`).
+- **Signature scope closed** — posture and hashes are now inside the SE signature over a coordinator nonce (F2 above).
+- **Plaintext egress hardening (#612)** — provider inference failures now cross the boundary only as closed-vocabulary codes; free-form provider/browser telemetry and automatic log upload were removed; inline video decodes through a memory-backed asset instead of a temp file; regression tests (`InferenceFailurePrivacyTests`, `ProviderLoggerPrivacyTests`) pin the behaviour. These were real leaks and they were closed properly.
+- **`mediafetch` SSRF guard** (`coordinator/mediafetch/ssrf.go`) — dial-time `Control` hook (so DNS rebinding cannot slip past a pre-flight check), IPv4-in-IPv6 unmapping, IPv6 zone stripping, and explicit denies for NAT64/6to4/Teredo/CGNAT/metadata. Better than most production SSRF filters we read.
+- **Prefix-cache privacy design** (`docs/architecture/cache-aware-routing.md`) — cache scope is a domain-separated HMAC over the **authenticated account**, so the classic cross-user prefix-cache oracle is structurally excluded, not merely rate-limited; disk blocks are AES-256-GCM under a Secure-Enclave-rooted KEK with HMAC-derived filenames, closing the disk confirmation oracle. The honest caveat is the one in §5: prompt-derived state now survives the request, which the UI still denies.
+- **Model weight-hash gate** — per-model aggregate hashes are refreshed from each verified challenge and gate catalog routing, so a swapped model build is a tripwire rather than a silent integrity break.
+- **`docs/threat-model.yaml`** — 2,665 lines of STRIDE with per-mitigation status, open items marked open (e.g. T-034's "reproducible build + public transparency log of blessed cdhashes: **open**"), and T-042 anticipating the log/disk payload-harvest variant of the APNs attack. Very few subjects in this guide have written down where their own controls stop. It is also the reason N1 is stated the way it is: their model assumes the adversary "cannot bypass SIP, Hardened Runtime, or the Secure Enclave" **on their own machine** — N1 needs neither, because it uses a *different* machine.
 
 ---
 
-## 6. Reproducing
+## 8. Recommendations, ranked
+
+1. **Bind the APNs device token to the attested device (N1).** Cheapest correct version: push a correlating nonce over the **MDM** channel — the coordinator already holds Apple's push token for that enrolled device — and require both to be answered on the same WebSocket. Alternative: fold `apns_device_token` into the SE-signed status canonical *and* into the MDA freshness nonce (`sha256(se_pubkey ‖ token)`), so Apple's signature covers the pair. Until then, do not describe the APNs round-trip as proving *which machine* runs genuine code.
+2. **Restore a published coordinator attestation (N3).** Expose the vTPM/SEV quote and the running container digest at a public endpoint, keep an append-only digest history, and publish the digest→commit build recipe. Also: implement the boot-time confidential-compute assertion the runbook already specifies, and correct the whitepaper's Intel TDX claim.
+3. **Fix the four UI claims and the landing-page sentence (N4).** The Terms and Privacy Policy already contain accurate language — use it. Replace "Software Integrity: hash matches the signed release" with the control that actually runs, and stop hardcoding `ok: true` on a claim that is false.
+4. **Publish `code_attested` and `se_key_bound` per provider** in `/v1/providers/attestation`, add `X-Provider-Code-Attested` to responses, and have the console verify the binding (`FreshnessCode == sha256(se_public_key)`) instead of discarding it. Fix the `providers[0]` fallback to a hard failure.
+5. **Gate on the MDA binding on the fresh path (F1)**, matching what the cached path already enforces.
+6. **Publish `APNS_ENFORCE_AFTER`'s value and the per-cohort attestation coverage** (N2). If enforcement is deliberately off while the fleet catches up, say so on the page that sells the privacy property.
+7. **Route a read-only `GET /v1/releases`** with an append-only, signed history (F4).
+
+---
+
+## 9. Reproducing
+
+Source-only checks (any machine, no account):
 
 ```bash
-# Coordinator TEE attestation (no account) — the operator IS in a real TDX TEE
-app=0x2ea79ae13e30c0c127d684c3e145a974abce1ce3
-curl -sS "https://userapi-compute.eigencloud.xyz/v2/apps/$app/attestations" \
-  | jq '.[0].verified_claims.tee_claims, .[0].verified_claims.container_claims.image_reference, .[0].created_at'
-#   INTEL_TDX, mrtd feb74866…, image docker.io/eigenlayer/eigencloud-containers@sha256:e891031f…
-# Dashboard: https://verify.eigencloud.xyz/app/0x2ea79ae13e30c0c127d684c3e145a974abce1ce3
+git clone https://github.com/Layr-Labs/d-inference && cd d-inference
+git checkout 232911ca690b78cbd3c8f65668d69f75a8f6bef0
 
-# Provider device chain + F1 binding (no account) — device attested, code NOT
-curl -sS https://api.darkbloom.dev/v1/providers/attestation > /tmp/feed.json
-python3 verify/binding-check.py /tmp/feed.json     # HOLDS 60 / FAILS 0
+# N1 — the APNs token is taken verbatim from the provider, never cross-checked
+grep -n "APNsDeviceToken" coordinator/registry/registry.go coordinator/api/provider_codeattest.go
+# N1 — posture is looked up by the provider's SELF-REPORTED serial
+sed -n '2689,2695p' coordinator/api/provider.go
+# N1 — no codesign / Team-ID / cdhash logic anywhere in the coordinator
+grep -rin "codesign\|cdhash\|teamid" --include=*.go coordinator/          # → no matches
+# N2 — grace is the default
+sed -n '1016,1021p' coordinator/registry/registry.go
+# N3 — the deployed substrate, in their words
+sed -n '27p' docs/operations/coordinator-deploy.md
+# N3 — no confidential-boot assertion exists
+grep -rin "confidential" --include=*.go --include=*.sh coordinator/ deploy/   # → comments only
+# N4 — the four UI claims, and the legal pages that contradict them
+sed -n '33,70p' console-ui/src/components/verification/NormalMode.tsx
+sed -n '295p'   landing/privacy.html
+sed -n '1304p'  landing/index.html
+```
 
-# The §1 hole, in the code:
-#   provider.go:835-907     coordinator checks a SELF-REPORTED binaryHash vs allowlist
-#   (no codesign/TeamID/cdhash check anywhere — grep the tree)
-#   RuntimeHashReporter      provider hashes currentExecutableURL() over ITSELF
-#   SecureEnclaveIdentity    bare SE key signs the blob — signs bytes, doesn't measure code
-#   whitepaper §1            "App Attest (DCAppAttestService) returns false for isSupported on macOS"
+Live checks — **not run in this pass** (`api.darkbloom.dev` was blocked by this session's egress policy):
+
+```bash
+# Is the code-identity gate actually ON? (the single external witness for N2)
+curl -sS https://api.darkbloom.dev/v1/stats \
+  | jq '{enforced: .code_attestation_enforced, attested: .code_attested_providers, active: .active_providers}'
+
+# Feed: does it now carry code_attested / se_key_bound / the SE-signed blob? (N4, F1, F2)
+curl -sS https://api.darkbloom.dev/v1/providers/attestation | jq '.providers[0] | keys'
+
+# MDA→SE binding, recomputed from the feed (F1) — unchanged from the June pass
+python3 verify/binding-check.py <(curl -sS https://api.darkbloom.dev/v1/providers/attestation)
+
+# Does the coordinator publish anything about itself yet? (N3)
+for p in /v1/coordinator/attestation /api/version /v1/releases; do
+  printf '%-32s ' "$p"; curl -sS -o /dev/null -w '%{http_code}\n' "https://api.darkbloom.dev$p"
+done
 ```
 
 ---
 
-## 7. References (first-party)
+## 10. References — `Layr-Labs/d-inference` @ `232911ca`
 
-**Apple — Managed Device Attestation (attests the *device*, not the code):**
-- [Managed Device Attestation for Apple devices](https://support.apple.com/guide/deployment/managed-device-attestation-dep28afbde6a/web) — overview: an org's ACME service requests an attestation of *device* properties (serial, etc.) and provisions a hardware-bound *device* identity.
-- [Deploy Managed Device Attestation](https://support.apple.com/guide/deployment/deploy-managed-device-attestation-dep54e5ac1fd/web) — ACME `device-attest-01` deployment.
+**The code-identity mechanism (N1)**
+- `docs/architecture/decisions/apns-code-attestation.md` — the design and its stated security argument.
+- `coordinator/api/provider_codeattest.go:230-435` — token intake, challenge, fail-closed verification, reuse fast-paths.
+- `coordinator/registry/registry.go:2854` — `APNsDeviceToken` taken verbatim from `RegisterMessage`.
+- `coordinator/api/provider.go:2689` — MDM posture looked up by self-reported serial.
+- `coordinator/api/provider.go:3145`, `:3221`, `:3077-3093` — MDA freshness nonce; unconditional `MDAVerified = true`; binding enforced only on the cached path.
+- `provider-swift/Sources/ProviderCore/Security/PersistentEnclaveKey.swift:78` — keychain access group `SLDQ2GJ6TL.io.darkbloom.provider` (this part *is* device- and signer-bound).
+- `docs/threat-model.yaml` T-034, T-042 — the vendor's own account of what the mechanism does and where they think it stops.
 
-**Apple — App Attest (the *code*-level primitive — unavailable on macOS):**
-- [`DCAppAttestService`](https://developer.apple.com/documentation/devicecheck/dcappattestservice) · [`DCAppAttestService.isSupported`](https://developer.apple.com/documentation/devicecheck/dcappattestservice/issupported) — "if you read isSupported from an app running on a Mac device, the value is always false." First-party confirmation of the §1 limitation.
+**Enforcement (N2)**
+- `coordinator/registry/registry.go:663` (chokepoint), `:1016` (grace default).
+- `coordinator/cmd/coordinator/main.go:789-809` (`APNS_ENFORCE_AFTER`), `:399` (`binaryHash` demoted).
+- `docs/architecture/routing-v2-attestation-churn.md` (≈67/176), `docs/operations/routing-v2-rollout.md` Stage 5.
 
-**Darkbloom whitepaper** (pinned to commit `069a6c3`):
-- [`papers/dginf-private-inference.pdf`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/papers/dginf-private-inference.pdf) — Definition 2 (adversary "execute arbitrary code as root"); §7.1 + Table 1 (the `binaryHash` defense); §9.3 (self-generated SE key bound via MDA nonce; App Attest unavailable); Table 10 (Coordinator TEE = Intel TDX; residual = physical probing).
+**Coordinator substrate (N3)**
+- `docs/operations/coordinator-deploy.md:27` — "Do not claim SEV-SNP for this VM."
+- `docs/operations/eigencloud-to-gcp-migration.md` — the move, and the unimplemented confidential-boot blocker.
+- `deploy/gcp/bootstrap.sh:296-309` — VM create with no confidential-compute flags.
+- `coordinator/api/server.go:1719-1992` — full route table; no coordinator-attestation endpoint.
 
-**Code — `Layr-Labs/d-inference` @ `069a6c3` (the §1 hole, in source):**
-- [`coordinator/api/provider.go#L835-L878`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/coordinator/api/provider.go#L835-L878) — provider acceptance checks a **self-reported** `binaryHash` against the allowlist; **no** codesign / Team-ID / cdhash check exists anywhere.
-- [`coordinator/api/consumer.go#L303`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/coordinator/api/consumer.go#L303) — `e2e.Encrypt(rawBody, …)`: coordinator holds plaintext and re-encrypts to the provider.
-- [`coordinator/api/sender_encryption.go#L177`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/coordinator/api/sender_encryption.go#L177) — `box.Open(...)`: coordinator decrypts the sealed request.
-- [`coordinator/api/telemetry_handlers.go#L46-L48`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/coordinator/api/telemetry_handlers.go#L46-L48) — telemetry allowlist: "prompt or response content MUST NEVER appear here."
-- [`coordinator/store/interface.go#L95`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/coordinator/store/interface.go#L95) — `RecordUsage(...)`: token counts only, no prompt columns.
-- [`provider-swift/.../Security/SecurityFoundation.swift#L254-L287`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/provider-swift/Sources/ProviderCore/Security/SecurityFoundation.swift#L254-L287) — `RuntimeHashReporter`: the provider hashes `currentExecutableURL()` **over itself**.
-- [`provider-swift/.../Security/SecureEnclaveIdentity.swift#L56`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/provider-swift/Sources/ProviderCore/Security/SecureEnclaveIdentity.swift#L56) — bare `SecureEnclave.P256.Signing.PrivateKey()` (no Apple cert; signs bytes, doesn't measure code).
-- [`provider-swift/.../Security/BinaryHasher.swift#L135`](https://github.com/Layr-Labs/d-inference/blob/069a6c3cd5c4072928c6acc98595e0aea11ae4ea/provider-swift/Sources/ProviderCore/Security/BinaryHasher.swift#L135) — `metallibHash()` (the GPU-kernel hash, also self-reported).
+**Consumer-facing claims (N4)**
+- `console-ui/src/components/verification/NormalMode.tsx:33-70`; `useDeviceVerification.ts:32-36`; `lib/cert-verify.ts:144-148`.
+- `coordinator/api/provider.go:3269` (feed shape); `coordinator/api/dispatch.go:2931-2951` (response headers).
+- `landing/index.html:1304`; `landing/privacy.html:295`; `landing/terms.html:196`.
 
-**Coordinator TEE attestation (EigenCloud — the operator IS in a real TDX TEE):**
-- Dashboard: [verify.eigencloud.xyz/app/0x2ea79ae1…](https://verify.eigencloud.xyz/app/0x2ea79ae13e30c0c127d684c3e145a974abce1ce3)
-- API: [`userapi-compute.eigencloud.xyz/v2/apps/0x2ea79ae1…/attestations`](https://userapi-compute.eigencloud.xyz/v2/apps/0x2ea79ae13e30c0c127d684c3e145a974abce1ce3/attestations)
-
-**Vendor venues (claims diverge — paper/blog candid, marketing overclaims):**
-- [Eigen engineering blog — Project Darkbloom](https://blog.eigencloud.xyz/project-darkbloom-unlocking-idle-compute-for-ai/) — "the coordinator remains part of the trusted routing layer."
-- [darkbloom.dev](https://www.darkbloom.dev/) — "the coordinator routes ciphertext, and only the matched provider's hardware-bound key can decrypt" (false as a mechanism; see F6).
+**Credit**
+- `coordinator/attestation/attestation.go:390` — `BuildStatusCanonical`.
+- `coordinator/mediafetch/ssrf.go` — the SSRF guard.
+- `docs/architecture/cache-aware-routing.md`, `docs/reference/ssd-kv-cache.md` — per-account cache scope, SE-rooted KEK.
+- commit `6f7960eb` (#612) — plaintext-egress hardening.

@@ -474,6 +474,41 @@ A more useful stage rating separates these axes. An app can be Stage 2 for cloud
 
 ---
 
+## 20. Composite Attestation: Count the Legs, Then Ask What Binds Them
+
+**New insight from darkbloom-d-inference (2026-08):**
+
+When a subject can't get one attestation that covers everything, it assembles several. Darkbloom's provider identity has three:
+
+| Leg | Apple mechanism | Proves |
+|---|---|---|
+| Posture (SIP / Secure Boot / SSV) | MDM `SecurityInfo` + MDA cert chain | the *enrolled device* is locked down |
+| Key possession | P-256 signature over a coordinator nonce | someone holds a private key |
+| Code identity | APNs push to the app's topic (AMFI gates who can register) | *a* process somewhere runs the signed binary |
+
+Each leg is individually sound and individually verifiable. The system is only as strong as what **binds them to one machine** — and here nothing does: the posture leg is looked up by a *self-reported serial number*, the SE key carries no Apple certificate, and the push token is copied verbatim off the wire. So the identity can be assembled across machines: one clean enrolled Mac supplies posture, an out-of-policy box supplies the push token, and a third machine holds the decryption key and serves the prompts.
+
+**The audit move:** for every composite attestation, draw the legs as a table and ask of each one, *"what makes this the same machine as the one that touches user data?"* A leg with no answer is decoration. Watch for the failure mode where a subject's threat model reasons about a *single* adversary machine ("the attacker cannot bypass SIP on their Mac") while the mechanism can be satisfied by *several*.
+
+**Related trap — an echoed nonce is not a binding.** Darkbloom sets the MDA freshness nonce to `sha256(se_pubkey)` and describes it as "cryptographically binding the SE identity to the Apple-attested hardware." Apple simply echoes the value the coordinator supplied into the cert. That is a sound *anti-replay* check for a cached chain, and nothing more. Whenever a design claims a nonce binds X to Y, ask who chose the nonce and whether the signer *measured* X or merely repeated it. (Same distinction as `signed ≠ measured` for a self-reported binary hash.)
+
+---
+
+## 21. A Control Behind a Runtime Flag Is a Control You Cannot Audit
+
+**Also from darkbloom-d-inference:**
+
+The code-identity gate above is real, fail-closed, and correctly placed at a single routing chokepoint. It is also inert unless `APNS_ENFORCE_AFTER` is set to a past instant — the default is a grace mode where un-attested providers keep serving. The value lives in the operator's secret manager. An outside auditor can read every line of the mechanism and still not know whether it runs.
+
+Two aggravators appear together often enough to be a pattern:
+
+1. **Coverage economics point the wrong way.** The routable pool was ≈67/176 when enforcement was designed, and one cohort (headless Macs with no GUI session) can *never* satisfy the check. A paid network that flips the switch loses capacity, so the incentive is to stay in grace.
+2. **The public surface advertises the retired control.** The consumer feed and response headers still carry `X-Provider-Attested` / `mda_verified` / a self-reported `secure_enclave` flag — signals the vendor's own threat model has demoted — while the new, load-bearing `CodeAttested` bit appears nowhere per-provider.
+
+**The audit move:** find the one field that reveals the enforcement state (here, `code_attestation_enforced` in the public `/v1/stats`), and treat "the mechanism exists in source" as a separate, weaker claim from "the mechanism is enforced in production." Ask subjects to publish the rollout state next to the privacy claim it backs.
+
+---
+
 ## Updated Stage 1 Quick Check
 
 For any dstack app (fail any = Stage 0):

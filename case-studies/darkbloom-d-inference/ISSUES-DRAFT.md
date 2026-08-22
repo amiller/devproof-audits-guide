@@ -342,3 +342,81 @@ Also: `docs/ARCHITECTURE.md` describes prod as *"GCP Confidential VM (AMD SEV-SN
 Plus, per F5b: `docs/ARCHITECTURE.md:81-82` references an `eigeninference` Python package that is not on PyPI, GitHub, or anywhere else we could find. Either ship the package or remove the example.
 
 These can be one PR, ~20 lines of changes, no behavior change.
+
+---
+---
+
+# 2026-08-22 addendum — N1–N4 (HEAD `232911ca`, paid-product relaunch)
+
+The F-list above was written against `cf4c0ef`/`069a6c3`; its line references are stale, though the findings' substance is tracked in `DEVPROOF-REPORT.md` §6. The four issues below are new and are written against `232911ca690b78cbd3c8f65668d69f75a8f6bef0`.
+
+**Routing note:** N1 is an exploitable identity-binding gap, not a verifiability gap. Send it to `security@eigenlabs.org` before filing anything publicly. N2–N4 are the right shape for public issues.
+
+---
+
+## N1 — The APNs code-identity proof is not bound to the attested device (security@, not a public issue)
+
+**Claim under test:** *"only our genuine, Team-ID-signed, push-provisioned binary can RECEIVE an APNs push for our App-ID … verified once per WebSocket connection"* (`docs/threat-model.yaml` T-034).
+
+That holds for the machine where AMFI is enforcing. The coordinator never learns which machine that is. Three legs, one unverified pivot:
+
+| Leg | Proof | Bound to a device? |
+|---|---|---|
+| Posture (SIP / Secure Boot / SSV) | Apple MDM `SecurityInfo` | To the device **whose serial the provider claims** — `coordinator/api/provider.go:2689` |
+| Key possession | P-256 signature over a coordinator nonce | No — the SE key carries no Apple certificate; remotely it is an ordinary P-256 key |
+| Code identity | APNs round-trip | No — `APNsDeviceToken` is copied verbatim from `RegisterMessage`/`HeartbeatMessage` (`coordinator/registry/registry.go:2854`, `coordinator/api/provider_codeattest.go:252`) and never cross-checked against the enrolled device |
+
+The MDA freshness nonce does not close this: it is `sha256(se_public_key)`, chosen by the coordinator and echoed by Apple (`provider.go:3145`). It proves the enrolled device answered a request *about* that key — not that the key lives in its enclave. On the fresh path it is not even gated (`provider.go:3221` sets `MDAVerified = true` regardless; a mismatch only logs a `Warn`).
+
+**Attack.** Enroll one clean Mac A (honest posture, otherwise idle). Run the modified inference server on machine B — B's posture is never checked. Obtain an APNs device token for topic `io.darkbloom.provider` on a machine where AMFI is not enforcing (SIP off + `amfi_get_out_of_my_way`) and relay the pushed ciphertext to B; the payload is encrypted to **B's own key**, so only the bytes are needed. B opens `/ws/provider` (**no authentication**; `auth_token` is optional and only links a payout account, `provider.go:327`), claims A's serial, self-reports every `PrivacyCapabilities` flag and the published runtime hashes, and answers the challenge. B is marked hardware-trusted and code-attested, prompts route to it, and its responses carry `X-Provider-Attested: true`.
+
+**What we could not test:** whether an AMFI-disabled Mac can obtain a token for another team's bundle ID. Client-side entitlement checking appears to be the only gate, but we did not observe it. The experiment: on a spare Mac with SIP and AMFI off, ad-hoc-sign a trivial app with `aps-environment` and `CFBundleIdentifier = io.darkbloom.provider`, call `registerForRemoteNotifications`, and push to the returned token with the production `.p8`. If the push lands, N1 is confirmed as written; if Apple refuses server-side, the guarantee rests on an undocumented Apple property that should be documented.
+
+**Fix (cheap):** the coordinator is already an MDM server for device A and holds Apple's push token *for that device*. Push a correlating nonce over the MDM channel and require both to be answered on the same WebSocket. Or fold `apns_device_token` into the SE-signed status canonical **and** into the MDA freshness nonce (`sha256(se_pubkey ‖ token)`) so Apple's signature covers the pair. Also gate on the MDA binding on the fresh path, matching what `attachCachedMDAProof` already enforces.
+
+---
+
+## N2 — Publish whether the code-identity gate is actually enforced
+
+`codeAttestationEnforcedLocked` (`coordinator/registry/registry.go:1016`) returns false whenever `APNS_ENFORCE_AFTER` is unset or still in the future — un-attested providers keep routing. The value lives in Secret Manager; the only external witness is one fleet-wide boolean, `code_attestation_enforced`, in `/v1/stats` (`coordinator/api/stats.go:262`).
+
+Meanwhile the documented routable pool was **≈67/176** (`docs/architecture/routing-v2-attestation-churn.md`), headless/login-screen Macs can never receive APNs at all (`docs/architecture/decisions/apns-code-attestation.md`, listed as an accepted negative), and the 30-minute reuse cache — including a **cross-version** reuse path (`provider_codeattest.go:60-115`) — exists because Apple's background-push budget (~2–3/hour/device) makes re-challenging expensive.
+
+**Ask:** publish the enforcement deadline and per-cohort attestation coverage, and state plainly on the page that sells the privacy property whether the gate is on today. If it is deliberately off during rollout that is a defensible engineering decision — but the people buying "the node operator can't see your data" should be able to tell.
+
+---
+
+## N3 — The coordinator's confidential-compute claim is no longer verifiable by anyone
+
+`docs/operations/coordinator-deploy.md:27`: *"GCP reports AMD **SEV** with maintenance policy `MIGRATE` … **Do not claim SEV-SNP for this VM.**"*
+
+1. **Nothing is published.** No `/v1/coordinator/attestation` route exists (`coordinator/api/server.go:1719-1992`); no vTPM quote, no container digest, no history. The EigenCloud app that carried Intel TDX quotes and a dated 35-entry image-digest history no longer serves this traffic. `/api/version` reports the *provider* release, not the coordinator build.
+2. **Memory encryption alone doesn't constrain the operator.** A TEE protects the guest from the host. What protected users from Eigen was the published image digest; without it, a prompt-logging build is externally indistinguishable from the audited one.
+3. **SEV is not SEV-SNP** — no memory-integrity protection, weaker attestation, and `MIGRATE` permits live migration. The migration runbook's own target was `SEV_SNP` + `TERMINATE`. The whitepaper (Table 10) still says Intel TDX.
+4. **The confidential-boot assertion was never implemented.** The runbook calls it a Phase-1 blocker: *"the coordinator … must verify it's actually on a confidential VM and refuse to serve if not. Omitting the flag silently produces a non-confidential VM where the host can read decrypted prompts, with zero error today."* A grep of `coordinator/` and `deploy/` returns comments only, and `deploy/gcp/bootstrap.sh:296-309` creates the VM with no confidential-compute flags.
+
+**Ask:** expose the attestation and running image digest at a public endpoint with an append-only history; publish the digest→commit build recipe; implement the boot assertion; correct the paper.
+
+---
+
+## N4 — The verification UI asserts four guarantees the code contradicts
+
+`console-ui/src/components/verification/NormalMode.tsx:33-70`:
+
+| UI claim | Code |
+|---|---|
+| "Hardware Identity … can't be cloned, copied, or faked" | ticked from the provider's **self-reported** `secure_enclave` flag; the SE key carries no Apple certificate |
+| "Software Integrity — its hash matches the signed release" | the hash check is default-off (`main.go:399`) and T-034 says it is *"no longer relied on as a code-identity control"*; the tick is driven by trust level. The control that replaced it (`CodeAttested`) is never shown. |
+| "Your prompts are encrypted end-to-end. Not even Darkbloom servers can read them." (`ok: true` hardcoded) | the coordinator decrypts every request to route, meter and render it — as `landing/privacy.html:295` and `landing/terms.html:196` both state correctly |
+| "memory is wiped after each request" | prompt-derived KV state now persists in the encrypted SSD prefix cache across requests and reboots |
+
+`landing/index.html:1304` still carries the June wording (*"the coordinator routes ciphertext, and only the matched provider's hardware-bound key can decrypt"*) — F6, unfixed, now on a paid product.
+
+Two verifier defects:
+
+- `console-ui/src/components/verification/useDeviceVerification.ts:32-36` falls back to `data.providers?.[0]` when the serving provider isn't found in the feed, then reports success — **verifying a machine that did not serve the request.** Should be a hard failure.
+- `console-ui/src/lib/cert-verify.ts:144-148` stops at chain→Apple root and explicitly discards the freshness OID, so the MDA→SE binding is never checked (F5).
+
+Underlying both: `/v1/providers/attestation` (`coordinator/api/provider.go:3269`) exposes no `code_attested`, no `se_key_bound` and no SE-signed blob, and the response headers (`dispatch.go:2931-2951`) carry `X-Provider-Attested` / `-Mda-Verified` but nothing about code identity. **The public feed advertises the signals that no longer carry the guarantee and omits the one that does.**
+
+**Ask:** publish `code_attested` and `se_key_bound` per provider, add `X-Provider-Code-Attested`, check the binding in the console verifier, fix the `providers[0]` fallback, and bring the four UI strings in line with the Privacy Policy.
