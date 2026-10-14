@@ -1,6 +1,6 @@
 # NEAR agent E2EE: field coverage and tool disclosure
 
-**Evidence date:** 2026-10-14. **Method:** source inspection, not a live deployment audit.
+**Evidence date:** 2026-10-14. **Method:** pinned source inspection and separately scoped live protocol checks; not a complete deployment audit.
 This supplement adds an agent-protocol boundary to the [May inference revisit](DEVPROOF-REPORT-revisit-2026-05-02.md).
 It does not replace that report's historical observations or change a Stage verdict.
 Work is tracked in [research #23](https://github.com/amiller/awesome-private-inference/issues/23)
@@ -86,3 +86,57 @@ Before enabling native tools, qualify:
 Synthetic checks can establish client refusal and ciphertext coverage. They cannot establish
 today's deployed service, the host's security, or absence of operator-controlled egress.
 No real transcript, live paid query or production configuration was used in this review.
+
+
+## Live native-tool protocol checks
+
+On 2026-10-14, explicitly budgeted synthetic checks against `z-ai/glm-5.3-flash`
+established two consecutive native function calls with encrypted schemas,
+names, arguments and result history. A separate call/result/final-answer round
+trip passed. Each accepted reply had a genuine `provider_tee` model signature
+whose declared request hash matched the client's encrypted wire body and whose
+response hash matched the received stream. Six POSTs total gave a catalog-priced
+signed-usage estimate of $0.00022808 within a $0.25 authorization. No service-token
+attack, external search or real private data was involved.
+
+The model TCB verified as UpToDate. Gateway TCB was OutOfDate with INTEL-SA-01192,
+INTEL-SA-01245, INTEL-SA-01312 and INTEL-SA-01313, so strict admission failed before
+inference. Protocol-only checks used the existing reported-TCB policy while
+retaining quote, freshness, key binding, GPU signature, measured compose,
+RPC-trusted Base registry and pinned gateway TLS checks. The observed outer
+composes were gateway `41e18f38978b031431dfc8a4fcf6d8c38da62b1b093fd1d0e39e26ee6fad030c`
+and model `c82b1a2eaf6996154a5f39ae621643f034b082d5e51edd3d2ba6009273881d86`.
+They do not close inner code/weights to this source revision.
+
+[Abalone PR #75](https://github.com/amiller/abalone/pull/75) contains the experimental
+codec, persistent bounded-budget harness and fifteen regressions, including actual
+Pi native-tool/result history. It authenticates the complete model response before
+consolidating fragments for Pi, whose parser expects a complete first function name.
+GLM's inline reasoning prefix with thinking disabled required the existing
+`</think>` rendering rule; this was separate from successful encryption/signature
+checks. Final source checks reverified all six saved live signature proofs. Normal
+providers and private-work enablement were not changed.
+
+## Gateway request-hash authority limits action-integrity claims
+
+The reviewed `routes/chat.rs::resolve_request_hash_for_signing` permits trusted
+service-token callers (`config.token`) to supply `X-Request-Hash`, including a
+hash differing from the body the model backend received. The dispatcher enables
+that override only for the trusted path; end-user cloud API keys cannot use it.
+The purpose is to preserve client hashes through gateway JSON reserialization.
+
+This is an integrity trust dependency. A genuine model signature matching the
+client's hash does not independently prove which body the model consumed: a
+privileged gateway can assert that hash while supplying a different encrypted
+request. Public-key field encryption does not authenticate its client author.
+Reply authenticity, field confidentiality and client-request origin are separate
+properties. A synthetic signature-level regression demonstrates this limitation;
+it is not a live exploit or evidence of access to deployed service credentials.
+
+Before gateway-independent native-tool execution is qualified, bind the actual
+client-authorized request inside the model enclave without a gateway assertion,
+or verify a client request signature bound to the response recipient and protocol.
+Otherwise explicitly include the gateway, its measured code and privileged
+service-credential custody in the trusted boundary and qualify them. The live
+protocol checks establish neither resolution. They support field interoperability
+and authentic model replies, not a passing private-agent Stage verdict.
