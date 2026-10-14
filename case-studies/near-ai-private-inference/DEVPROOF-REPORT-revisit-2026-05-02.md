@@ -17,6 +17,8 @@ operator-shaped logging path?
 
 ---
 
+> Later source-only supplement: [agent E2EE field coverage and tool disclosure, 2026-10-14](AGENT-E2EE-BOUNDARY-2026-10-14.md). It does not change this report's dated deployment observations.
+
 ## Prior experiments (timeline)
 
 | Date | Commit | Artifact |
