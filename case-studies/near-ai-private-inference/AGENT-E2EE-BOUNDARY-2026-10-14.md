@@ -140,3 +140,35 @@ Otherwise explicitly include the gateway, its measured code and privileged
 service-credential custody in the trusted boundary and qualify them. The live
 protocol checks establish neither resolution. They support field interoperability
 and authentic model replies, not a passing private-agent Stage verdict.
+
+
+## Read-only manager evidence follow-up
+
+A fresh read-only capture on 2026-10-14 independently verified the manager's
+Intel quote using PCS collateral. Its TCB was UpToDate; report data bound the
+client nonce and digest of 186 actions, and MRTD/RTMR0–3 matched the model quote.
+The recorded compose file at commit `46bfd83ec22c179693e06308e40950d540154b4d`
+matched SHA-256 `c7c1bf4d82e137b8d2e0788f41cd6637b38bd08fdc74f38e87b4571ce0c8562e`.
+These checks authenticate recorded history, not current container/model state.
+The fresh report's model outer-compose bytes differ from the earlier native-tool
+observations; interoperability results are not transferred to the new capture.
+
+Current [compose-manager source](https://github.com/nearai/compose-manager/blob/aa9de34419c753c432259ecbcc717b6e2a7357c6/src/main.rs#L357)
+defines canonical sorted-key compact UTF-8 actions, so reformatting alone does
+not prevent verification under that contract. Exact response bytes are now
+retained for review and legacy variants. The earlier assertion that original
+bytes were always required was too broad. The same source notes that some
+compose actions are recorded before success; a signed action is not proof of
+an active image. This manager source-to-image relationship remains open.
+
+Public [gateway source](https://github.com/nearai/cloud-api/blob/752e2976a7ee2a8790163974ba4a70dd218bbf3b/crates/inference_providers/src/attested/nearai/mod.rs#L1941)
+sets X-Request-Hash while reserializing requests and uses an upstream bearer key
+loaded from INFERENCE_API_KEY. The recorded model config supplies TOKEN from
+PROXY_TOKEN; equality/custody of deployed secrets is not independently verified.
+Source traces explain intended gateway authority, not gateway-independent integrity.
+
+[Abalone PR #75](https://github.com/amiller/abalone/pull/75) adds read-only capture
+and manager-quote checks plus seven offline negative/serialization tests.
+[Integrity sprint #77](https://github.com/amiller/abalone/issues/77) tracks remaining
+active-state/source/artifact evidence and token custody. No new inference POSTs,
+configuration changes, release or audit Stage changes resulted from this work.
